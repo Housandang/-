@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>設定エディタ</title>
+<style>
+  :root {
+    --bg: #15151f;
+    --panel: #1d1d2c;
+    --border: #30304a;
+    --text: #e4e4f0;
+    --muted: #8a8aa3;
+    --accent: #7c9eff;
+    --accent-dim: #3d4a73;
+    --ok: #6fcf97;
+    --warn: #e0a85c;
+    --danger: #e06c6c;
+    --mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', 'Hiragino Sans', 'Yu Gothic', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 18px 28px 14px;
+  }
+  h1 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+  .filebar {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  .drop {
+    flex: 1;
+    min-width: 220px;
+    border: 1.5px dashed var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .drop:hover { border-color: var(--accent-dim); background: #1a1a28; }
+  .drop.loaded { border-style: solid; border-color: var(--ok); color: var(--text); }
+  .drop .fname { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drop .badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: var(--accent-dim);
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  .drop.loaded .badge { background: var(--ok); color: #0a1f14; }
+
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 24px 28px 120px;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    padding: 9px 18px;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    user-select: none;
+  }
+  .tab.active { color: var(--text); border-color: var(--accent); }
+  .tab:hover:not(.active) { color: var(--text); }
+
+  .empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--muted);
+  }
+  .empty-state .icon { font-size: 36px; margin-bottom: 12px; opacity: .5; }
+
+  .category {
+    margin-bottom: 28px;
+  }
+  .category-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+    padding-left: 2px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    margin-bottom: 6px;
+  }
+  .row .label {
+    flex: 0 0 220px;
+    font-size: 13px;
+  }
+  .row .desc {
+    flex: 1;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .row input[type="text"],
+  .row input[type="number"],
+  .row select {
+    flex: 0 0 150px;
+    background: #0f0f18;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+  .row select { font-family: inherit; }
+  .row input:focus, .row select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .row.changed { border-color: var(--warn); }
+  .row.changed input, .row.changed select { border-color: var(--warn); }
+  .row.invalid input { border-color: var(--danger); }
+
+  footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+  footer .status {
+    flex: 1;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  footer .status.warn { color: var(--warn); }
+  button {
+    font-family: inherit;
+    font-size: 13.5px;
+    font-weight: 600;
+    padding: 10px 22px;
+    border-radius: 7px;
+    border: none;
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+  button:hover { opacity: .88; }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #0c1326; }
+  .btn-secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+
+  input[type="file"] { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>設定エディタ</h1>
+  <div class="subtitle">launcher.ahk / lock_window.ahk の設定値を編集して、書き換え済みファイルをダウンロードします</div>
+  <div class="filebar">
+    <label class="drop" id="dropLauncher">
+      <span class="fname">launcher.ahk を選択 / ドロップ</span>
+      <span class="badge">未読込</span>
+      <input type="file" id="fileLauncher" accept=".ahk">
+    </label>
+    <label class="drop" id="dropLock">
+      <span class="fname">lock_window.ahk を選択 / ドロップ</span>
+      <span class="badge">未読込</span>
+      <input type="file" id="fileLock">
+    </label>
+  </div>
+</header>
+
+<main>
+  <div class="tabs">
+    <div class="tab active" data-tab="launcher">launcher.ahk</div>
+    <div class="tab" data-tab="lock">lock_window.ahk</div>
+  </div>
+  <div id="content"></div>
+</main>
+
+<footer>
+  <div class="status" id="status">ファイルを読み込むと編集できます</div>
+  <button class="btn-secondary" id="btnReset" disabled>変更を破棄</button>
+  <button class="btn-primary" id="btnSave" disabled>保存（ダウンロード）</button>
+</footer>
+
+<script>
+// ================================================================
+// 設定定義（カテゴリ・変数名・型・ラベル・説明）
+// ================================================================
+const DEFS = {
+  launcher: [
+    {cat: "スリープ・起動", var: "delayMinutes",        type: "int",    label: "起動までの待機時間（分）",         desc: "スリープ復帰後、何分後にクロッキーを開始するか"},
+    {cat: "スリープ・起動", var: "minSleepHours",       type: "int",    label: "就寝判定の閾値（時間）",           desc: "スリープ時間がこの値以上の場合のみ起動"},
+    {cat: "食事休憩",       var: "mealPauseStartH",     type: "int",    label: "食事休憩 開始（時）",              desc: "食事休憩の開始時刻（時）"},
+    {cat: "食事休憩",       var: "mealPauseStartM",     type: "int",    label: "食事休憩 開始（分）",              desc: "食事休憩の開始時刻（分）"},
+    {cat: "食事休憩",       var: "mealPauseEndH",       type: "int",    label: "食事休憩 終了（時）",              desc: "食事休憩の終了時刻（時）"},
+    {cat: "食事休憩",       var: "mealPauseEndM",       type: "int",    label: "食事休憩 終了（分）",              desc: "食事休憩の終了時刻（分）"},
+    {cat: "クロッキー",     var: "croquisMode",         type: "select", label: "クロッキーモード",                 desc: "翌日のクロッキーモードを選択",
+      options: [["1","1 … 25分×1枚"], ["2","2 … 15分×2枚"], ["3","3 … 5分×5枚"]]},
+    {cat: "クロッキー",     var: "croquisDelayMinutes", type: "int",    label: "クロッキー開始前の待機時間（分）", desc: "起動後、クロッキーを始める前の準備時間"},
+    {cat: "週次レポート",   var: "croquisReportWDay",   type: "select", label: "週次レポート送信曜日",             desc: "クロッキー成果をDiscordに送る曜日",
+      options: [["1","日曜"],["2","月曜"],["3","火曜"],["4","水曜"],["5","木曜"],["6","金曜"],["7","土曜"]]},
+    {cat: "週次レポート",   var: "croquisReportHour",   type: "int",    label: "週次レポート送信時刻（時）",       desc: "送信する時刻（0〜23）"},
+    {cat: "就寝ブロック",   var: "nightBlockDelay",     type: "int",    label: "就寝モード遅延時間（分）",         desc: "就寝モード開始からブロックまでの分数"},
+    {cat: "就寝ブロック",   var: "nightBlockHourStart", type: "int",    label: "就寝ブロック 開始（時）",          desc: "就寝ブロックが有効になる時刻"},
+    {cat: "就寝ブロック",   var: "nightBlockHourEnd",   type: "int",    label: "就寝ブロック 終了（時）",          desc: "就寝ブロックが解除される時刻"},
+    {cat: "サボり検知",     var: "absentThresholdMin",  type: "int",    label: "サボり判定の無操作時間（分）",     desc: "この分数無操作が続くとサボり判定になる"},
+  ],
+  lock: [
+    {cat: "自動起動設定", var: "autoLockSecs",          type: "int", label: "ロック時間（秒）",             desc: "/auto 起動時のロック時間"},
+    {cat: "自動起動設定", var: "autoBreakSecs",         type: "int", label: "休憩時間（秒）",               desc: "/auto 起動時の休憩時間"},
+    {cat: "自動起動設定", var: "autoTotalSets",         type: "int", label: "セット数",                     desc: "/auto 起動時のセット数"},
+    {cat: "クロッキー",   var: "croquisLockSecs",       type: "int", label: "ロック時間（秒）",             desc: "クロッキーモード1のロック時間（25分=1500）"},
+    {cat: "クロッキー",   var: "croquisCaptureWait",    type: "int", label: "撮影前の猶予（秒）",           desc: "タイマー終了からスクショ撮影までの秒数"},
+    {cat: "クロッキー",   var: "croquisBreakSecs",      type: "int", label: "クロッキー後の休憩（秒）",     desc: "全セット終了後の休憩時間"},
+    {cat: "中休み",       var: "intermissionMinutes",   type: "int", label: "中休み時間（分）",             desc: "全セット完了後の中休みの長さ"},
+    {cat: "中休み",       var: "intermissionAddSets",   type: "int", label: "タイムアウト時の追加セット数", desc: "中休み中に何もしないと追加されるセット数"},
+    {cat: "食事休憩",     var: "mealPauseStartH",       type: "int", label: "食事休憩 開始（時）",          desc: "食事休憩の開始時刻（時）"},
+    {cat: "食事休憩",     var: "mealPauseStartM",       type: "int", label: "食事休憩 開始（分）",          desc: "食事休憩の開始時刻（分）"},
+    {cat: "食事休憩",     var: "mealPauseEndH",         type: "int", label: "食事休憩 終了（時）",          desc: "食事休憩の終了時刻（時）"},
+    {cat: "食事休憩",     var: "mealPauseEndM",         type: "int", label: "食事休憩 終了（分）",          desc: "食事休憩の終了時刻（分）"},
+    {cat: "運動・昼休み", var: "exerciseUnlockMinutes", type: "int", label: "運動モード時間（分）",         desc: "運動モードのロック解除時間"},
+    {cat: "運動・昼休み", var: "lunchBreakMinutes",     type: "int", label: "昼休み時間（分）",             desc: "昼休みモードの時間"},
+    {cat: "作業達成",     var: "totalWorkGoalMinutes",  type: "int", label: "作業達成目標時間（分）",       desc: "この時間作業すると達成。0で無効"},
+    {cat: "休憩延期",     var: "breakDeferGraceSecs",   type: "int", label: "休憩延期の猶予（秒）",         desc: "作業以外のウィンドウが続いたら休憩開始とみなす秒数"},
+    {cat: "集中モード",   var: "focusModeAutoFromSet",  type: "int", label: "自動発動の開始セット",         desc: "何セット目以降で集中モードが自動発動するか"},
+    {cat: "集中モード",   var: "focusModeAutoChance",   type: "int", label: "自動発動の確率（%）",          desc: "集中モードが自動発動する確率"},
+    {cat: "ゲーム制限",   var: "gameLimitMinutes",      type: "int", label: "ゲーム制限時間（分）",         desc: "1日のゲームプレイ上限時間"},
+    {cat: "ゲーム制限",   var: "gameLimitExtendSets",   type: "int", label: "延長に必要なセット数",         desc: "制限後に延長するために必要な作業セット数"},
+  ]
+};
+
+// ================================================================
+// 状態
+// ================================================================
+const state = {
+  launcher: { filename: null, content: null, values: {}, original: {} },
+  lock:     { filename: null, content: null, values: {}, original: {} },
+};
+let currentTab = "launcher";
+
+// ================================================================
+// ファイルからの値抽出
+// 形式: varName := value   (行末コメント可、文字列は引用符を除去)
+// ================================================================
+function extractValue(content, varName) {
+  const lines = content.split(/\r?\n/);
+  const re = new RegExp("^" + varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "\\s*:=\\s*(.+?)(?:\\s*;.*)?$");
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith(";")) continue;
+    const m = line.match(re);
+    if (m) {
+      let val = m[1].trim();
+      if (val.startsWith('"') && val.endsWith('"')) {
+        val = val.slice(1, -1);
+      }
+      return val;
+    }
+  }
+  return null;
+}
+
+function writeValue(content, varName, newVal, isStr) {
+  const escaped = varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp("^(" + escaped + "\\s*:=\\s*)(.+?)(\\s*;.*)?$", "m");
+  const replacement = isStr ? `${varName} := "${newVal}"` : `${varName} := ${newVal}`;
+  let found = false;
+  const result = content.replace(re, (match, p1, p2, p3) => {
+    found = true;
+    return replacement + (p3 || "");
+  });
+  return { result, found };
+}
+
+// ================================================================
+// ファイル読み込み
+// ================================================================
+function setupDropzone(dropId, fileInputId, tabKey) {
+  const drop = document.getElementById(dropId);
+  const input = document.getElementById(fileInputId);
+
+  drop.addEventListener("click", () => input.click());
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.style.borderColor = "var(--accent)"; });
+  drop.addEventListener("dragleave", () => { drop.style.borderColor = ""; });
+  drop.addEventListener("drop", e => {
+    e.preventDefault();
+    drop.style.borderColor = "";
+    if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0], tabKey, drop);
+  });
+  input.addEventListener("change", () => {
+    if (input.files.length) loadFile(input.files[0], tabKey, drop);
+  });
+}
+
+function loadFile(file, tabKey, dropEl) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const content = reader.result;
+    const s = state[tabKey];
+    s.filename = file.name;
+    s.content = content;
+    s.values = {};
+    s.original = {};
+
+    for (const def of DEFS[tabKey]) {
+      const v = extractValue(content, def.var);
+      s.values[def.var] = v;
+      s.original[def.var] = v;
+    }
+
+    dropEl.classList.add("loaded");
+    dropEl.querySelector(".fname").textContent = file.name;
+    dropEl.querySelector(".badge").textContent = "読込済";
+
+    render();
+    updateStatus();
+  };
+  reader.readAsText(file, "UTF-8");
+}
+
+// ================================================================
+// 描画
+// ================================================================
+function render() {
+  const content = document.getElementById("content");
+  const s = state[currentTab];
+
+  if (!s.content) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">📄</div>
+        <div>${currentTab === "launcher" ? "launcher.ahk" : "lock_window.ahk"} を読み込んでください</div>
+      </div>`;
+    return;
+  }
+
+  const defs = DEFS[currentTab];
+  const cats = [...new Set(defs.map(d => d.cat))];
+
+  content.innerHTML = cats.map(cat => {
+    const rows = defs.filter(d => d.cat === cat).map(def => {
+      const val = s.values[def.var] ?? "";
+      const changed = val !== s.original[def.var];
+      const rowClass = "row" + (changed ? " changed" : "");
+
+      let inputHtml;
+      if (def.type === "select") {
+        const opts = def.options.map(([v, label]) =>
+          `<option value="${v}" ${String(v) === String(val) ? "selected" : ""}>${label}</option>`
+        ).join("");
+        inputHtml = `<select data-var="${def.var}">${opts}</select>`;
+      } else {
+        inputHtml = `<input type="text" inputmode="numeric" data-var="${def.var}" value="${escapeAttr(val)}">`;
+      }
+
+      return `
+        <div class="${rowClass}" data-row="${def.var}">
+          <div class="label">${def.label}</div>
+          ${inputHtml}
+          <div class="desc">${def.desc}</div>
+        </div>`;
+    }).join("");
+
+    return `
+      <div class="category">
+        <div class="category-title">${cat}</div>
+        ${rows}
+      </div>`;
+  }).join("");
+
+  // イベントバインド
+  content.querySelectorAll("[data-var]").forEach(el => {
+    el.addEventListener("input", onFieldChange);
+    el.addEventListener("change", onFieldChange);
+  });
+}
+
+function escapeAttr(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
+function onFieldChange(e) {
+  const varName = e.target.dataset.var;
+  const s = state[currentTab];
+  s.values[varName] = e.target.value;
+
+  const def = DEFS[currentTab].find(d => d.var === varName);
+  const row = e.target.closest(".row");
+  const changed = e.target.value !== s.original[varName];
+  row.classList.toggle("changed", changed);
+
+  if (def.type === "int") {
+    const valid = /^-?\d+$/.test(e.target.value.trim());
+    row.classList.toggle("invalid", !valid);
+  }
+
+  updateStatus();
+}
+
+// ================================================================
+// ステータス・ボタン制御
+// ================================================================
+function updateStatus() {
+  const statusEl = document.getElementById("status");
+  const saveBtn = document.getElementById("btnSave");
+  const resetBtn = document.getElementById("btnReset");
+
+  const loadedCount = [state.launcher, state.lock].filter(s => s.content).length;
+  const changedCount = [state.launcher, state.lock].reduce((acc, s) => {
+    if (!s.content) return acc;
+    return acc + Object.keys(s.values).filter(k => s.values[k] !== s.original[k]).length;
+  }, 0);
+
+  const invalidCount = document.querySelectorAll(".row.invalid").length;
+
+  if (loadedCount === 0) {
+    statusEl.textContent = "ファイルを読み込むと編集できます";
+    statusEl.className = "status";
+  } else if (invalidCount > 0) {
+    statusEl.textContent = `${invalidCount} 件の入力値が不正です（整数を入力してください）`;
+    statusEl.className = "status warn";
+  } else if (changedCount > 0) {
+    statusEl.textContent = `${changedCount} 件変更あり。保存すると書き換え済みファイルがダウンロードされます`;
+    statusEl.className = "status warn";
+  } else {
+    statusEl.textContent = `${loadedCount} 件読込済み。変更なし`;
+    statusEl.className = "status";
+  }
+
+  saveBtn.disabled = loadedCount === 0 || invalidCount > 0;
+  resetBtn.disabled = changedCount === 0;
+}
+
+// ================================================================
+// 保存（ダウンロード）
+// ================================================================
+function saveAll() {
+  let anySaved = false;
+
+  for (const tabKey of ["launcher", "lock"]) {
+    const s = state[tabKey];
+    if (!s.content) continue;
+
+    let newContent = s.content;
+    let hasError = false;
+
+    for (const def of DEFS[tabKey]) {
+      const newVal = s.values[def.var];
+      if (newVal === s.original[def.var]) continue; // 未変更はスキップ
+
+      const isStr = def.type === "str";
+      if (def.type === "int" && !/^-?\d+$/.test(String(newVal).trim())) {
+        hasError = true;
+        continue;
+      }
+
+      const { result, found } = writeValue(newContent, def.var, newVal, isStr);
+      if (found) {
+        newContent = result;
+      }
+    }
+
+    if (hasError) continue;
+
+    downloadFile(s.filename, newContent);
+    anySaved = true;
+
+    // 保存後、現在の値を「元の値」として更新（再度の差分表示をリセット）
+    s.content = newContent;
+    s.original = { ...s.values };
+  }
+
+  if (anySaved) {
+    render();
+    updateStatus();
+    flashStatus("ダウンロードフォルダに書き換え済みファイルを保存しました。元のファイルに上書きしてください。");
+  }
+}
+
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function flashStatus(msg) {
+  const statusEl = document.getElementById("status");
+  const original = statusEl.textContent;
+  const originalClass = statusEl.className;
+  statusEl.textContent = msg;
+  statusEl.className = "status";
+  statusEl.style.color = "var(--ok)";
+  setTimeout(() => {
+    statusEl.style.color = "";
+    updateStatus();
+  }, 3500);
+}
+
+function resetChanges() {
+  for (const tabKey of ["launcher", "lock"]) {
+    const s = state[tabKey];
+    if (!s.content) continue;
+    s.values = { ...s.original };
+  }
+  render();
+  updateStatus();
+}
+
+// ================================================================
+// タブ切り替え
+// ================================================================
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    currentTab = tab.dataset.tab;
+    render();
+  });
+});
+
+// ================================================================
+// 初期化
+// ================================================================
+setupDropzone("dropLauncher", "fileLauncher", "launcher");
+setupDropzone("dropLock", "fileLock", "lock");
+document.getElementById("btnSave").addEventListener("click", saveAll);
+document.getElementById("btnReset").addEventListener("click", resetChanges);
+render();
+</script>
+</body>
+</html>
