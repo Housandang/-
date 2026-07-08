@@ -625,6 +625,12 @@ global workDoneBtn := timerGui.Add("Button", "x205 y8 w90 h24", "✅ 完了")
 workDoneBtn.OnEvent("Click", OnWorkDone)
 workDoneBtn.Visible := false
 
+; 食事休憩の手動終了ボタン（食事休憩中のみ表示・変更不要）
+; 数字表示（timerCount）と同じ位置に重ねて表示し、休憩中だけ切り替えます
+global mealEndBtn := timerGui.Add("Button", "x73 y38 w160 h36", "⏭ 食事休憩を終了")
+mealEndBtn.OnEvent("Click", OnMealEnd)
+mealEndBtn.Visible := false
+
 timerGui.Show("Center w305 h158 NoActivate Hide")
 
 ; トレイアイコンのダブルクリックでタイマーGUIを最前面に戻す
@@ -668,6 +674,8 @@ UpdateTooltip() {
             ToolTip("🎯 集中モードを開始`n許可リスト以外のウィンドウをすべて最小化します`n解除は休憩中のみ可能です")
     } else if (ctrlHwnd = workDoneBtn.Hwnd) {
         ToolTip("✅ 今日の作業完了を宣言`nサボり監視を停止し、待機モードに移行します`n押さない場合は " intermissionMinutes " 分後にセットが追加されます")
+    } else if (ctrlHwnd = mealEndBtn.Hwnd) {
+        ToolTip("⏭ 食事休憩を今すぐ終了して`nタイマーを再開します")
     } else {
         ToolTip()
     }
@@ -1193,10 +1201,17 @@ CheckGameLimit() {
 SetTimer(CheckMealPause, 15000)
 
 CheckMealPause() {
-    global g, timerGui, timerTitle, timerCount, timerSub
+    global g, timerGui, timerTitle, timerCount, timerSub, mealEndBtn, isCroquis
     global mealPauseStartH, mealPauseStartM, mealPauseEndH, mealPauseEndM
 
     if (g.phase = "")
+        return
+
+    ; クロッキー中は食事休憩による割り込みを行わない。
+    ; （タイマー終了間際に食事休憩が割り込むと g.isPaused が true のままになり、
+    ;   撮影フェーズへ移行できなくなる問題があったため。クロッキーは短時間なので
+    ;   食事時間帯に多少かかっても中断せず最後まで進行させる）
+    if (isCroquis)
         return
 
     h := Integer(FormatTime(, "H"))
@@ -1218,9 +1233,10 @@ CheckMealPause() {
         WritePhase("lunch")   ; サボり検知を無効化
         timerGui.BackColor := "37474F"
         timerTitle.Value   := "🍽️ 食事休憩中"
-        timerCount.Value   := "--:--"
+        timerCount.Visible := false   ; 数字表示を隠し、代わりに手動終了ボタンを表示
         endTimeStr         := Format("{:02d}:{:02d}", mealPauseEndH, mealPauseEndM)
-        timerSub.Value     := endTimeStr " に自動で再開します"
+        timerSub.Value     := endTimeStr " に自動で再開します（手動終了も可）"
+        mealEndBtn.Visible := true
         NextDnsUnblock()
         SoundPlay("*48")
         TrayTip("食事休憩", endTimeStr " にタイマーを再開します", "Mute")
@@ -1231,26 +1247,51 @@ CheckMealPause() {
         if (g.isExercise)
             return
 
-        g.isPaused        := false
-        g.lastActiveCheck := 0   ; 食事休憩中の経過時間が作業時間に加算されないようリセット
-        g.endTick         := A_TickCount + g.pausedRemainingMs
-
-        WritePhase(g.phase)   ; サボり検知を元のフェーズに戻す
-
-        if (g.phase = "lock") {
-            timerGui.BackColor := "CC3333"
-            timerTitle.Value   := "🔒 Lock  -  Set " g.currentSet "/" g.totalSets
-            timerSub.Value     := "remaining time"
-        } else {
-            timerGui.BackColor := "2E7D32"
-            timerTitle.Value   := "☕ Break  -  Set " g.currentSet "/" g.totalSets
-            timerSub.Value     := "enjoy your break!"
-        }
-        if (g.phase = "lock")
-            NextDnsBlock()
-        SoundPlay("*48")
-        TrayTip("作業再開", "タイマーを再開します", "Mute")
+        EndMealPauseResume()
     }
+}
+
+; ===== 食事休憩終了時の共通処理（自動終了・手動終了ボタン共通・変更不要）=====
+EndMealPauseResume() {
+    global g, timerGui, timerTitle, timerCount, timerSub, mealEndBtn
+
+    g.isPaused        := false
+    g.lastActiveCheck := 0   ; 食事休憩中の経過時間が作業時間に加算されないようリセット
+    g.endTick         := A_TickCount + g.pausedRemainingMs
+
+    timerCount.Visible := true
+    mealEndBtn.Visible  := false
+
+    WritePhase(g.phase)   ; サボり検知を元のフェーズに戻す
+
+    if (g.phase = "lock") {
+        timerGui.BackColor := "CC3333"
+        timerTitle.Value   := "🔒 Lock  -  Set " g.currentSet "/" g.totalSets
+        timerSub.Value     := "remaining time"
+    } else {
+        timerGui.BackColor := "2E7D32"
+        timerTitle.Value   := "☕ Break  -  Set " g.currentSet "/" g.totalSets
+        timerSub.Value     := "enjoy your break!"
+    }
+    if (g.phase = "lock")
+        NextDnsBlock()
+    SoundPlay("*48")
+    TrayTip("作業再開", "タイマーを再開します", "Mute")
+}
+
+; ===== 食事休憩の手動終了ボタン処理（変更不要）=====
+OnMealEnd(btn, *) {
+    global g
+
+    if (!g.inMealPause)
+        return
+
+    g.inMealPause := false
+
+    if (g.isExercise)   ; 運動中は運動終了時にまとめて処理されるため何もしない
+        return
+
+    EndMealPauseResume()
 }
 
 ; ===== 運動ボタン処理（変更不要）=====
@@ -1305,16 +1346,21 @@ ExerciseTimer() {
 }
 
 ResumeAfterExercise() {
-    global g, exerciseUnlockKey, timerGui, timerTitle, timerCount, timerSub
+    global g, exerciseUnlockKey, timerGui, timerTitle, timerCount, timerSub, mealEndBtn
     global mealPauseEndH, mealPauseEndM
 
     g.targetTitles.Push(exerciseUnlockKey)
     g.isExercise := false
 
     if (g.inMealPause) {
+        ; 運動終了時点でまだ食事休憩中だった場合。
+        ; 手動終了ボタンはここでは出さず（運動→食事の遷移は稀なケースのため）、
+        ; 数字表示は "--:--" のまま見せておき、自動終了（CheckMealPause）を待つ。
         timerGui.BackColor := "37474F"
         timerTitle.Value   := "🍽️ 食事休憩中"
         timerCount.Value   := "--:--"
+        timerCount.Visible := true
+        mealEndBtn.Visible := false
         endTimeStr         := Format("{:02d}:{:02d}", mealPauseEndH, mealPauseEndM)
         timerSub.Value     := endTimeStr " に自動で再開します"
         NextDnsUnblock()   ; 食事休憩中はスマホブロックを解除
