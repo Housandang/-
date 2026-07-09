@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force   ; 既存のインスタンスを確認なしで自動終了・上書き
 
 ; ================================================================
@@ -214,7 +214,7 @@ autoTotalSets := 3
 ; ================================================================
 croquisLockSecs    := 1500   ; 25分
 croquisShotDir     := A_ScriptDir "\croquis_shots"   ; キャプチャ保存先
-croquisCaptureWait := 180     ; タイマー終了からスクショ撮影までの猶予（秒）
+croquisCaptureWait := 10     ; タイマー終了からスクショ撮影までの猶予（秒）
 croquisBreakSecs   := 300    ; クロッキー後の休憩時間（秒）
 
 ; ================================================================
@@ -900,6 +900,15 @@ FocusCountdownTick() {
     timerSub.Value := "🎯 集中モード開始まで " secs " 秒..."
 }
 
+; ===== 配列に指定した値が含まれるか判定（変更不要）=====
+HasVal(arr, val) {
+    for v in arr {
+        if (v = val)
+            return true
+    }
+    return false
+}
+
 ; ===== 集中モード：許可リスト以外の全ウィンドウを最小化（変更不要）=====
 FocusModeMinimize() {
     global g, focusModeAllowList, focusModeAllowProcesses, timerGui
@@ -1002,7 +1011,8 @@ FocusModeMinimize() {
                 continue
 
             WinMinimize("ahk_id " hwnd)
-            g.focusMinimizedHwnds.Push(hwnd)   ; 復元用に記録
+            if (!HasVal(g.focusMinimizedHwnds, hwnd))   ; 重複記録を防止（同じウィンドウが何度もトグルする対策）
+                g.focusMinimizedHwnds.Push(hwnd)   ; 復元用に記録
         }
     }
 
