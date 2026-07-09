@@ -1044,8 +1044,9 @@ SetTimer(CheckActiveWork, 5000)
 CheckActiveWork() {
     global g, totalWorkGoalMinutes
 
-    ; ロックフェーズ・一時停止していないときのみ計測
-    if (g.phase != "lock" || g.isPaused || totalWorkGoalMinutes = 0)
+    ; ロックフェーズ・中休み中・一時停止していないときのみ計測
+    ; （中休み中も計測対象に含めないと「中休み中に達成した場合も即座に表示」が機能しないため）
+    if ((g.phase != "lock" && g.phase != "intermission") || g.isPaused || totalWorkGoalMinutes = 0)
         return
 
     ; 作業ウィンドウがアクティブか確認
