@@ -91,25 +91,22 @@ croquisReportHour    := 15   ; 15時
 ; ================================================================
 ; ★ 就寝時スマホブロックの設定
 ;
-;    nightBlockDelay     … スリープ開始から何分後にブロックするか
-;    nightBlockHourStart … 発動対象の開始時刻（この時刻以降）
-;    nightBlockHourEnd   … 発動対象の終了時刻（この時刻まで）
+;    nightBlockDelay … 就寝モード開始（トレイメニュー操作）から
+;                       何分後にスマホをブロック＋PCをスリープさせるか
 ;
 ;    nextdns 系の値は lock_window.ahk と合わせてください。
 ; ================================================================
-nightBlockDelay     := 30
-nightBlockHourStart := 23
-nightBlockHourEnd   := 9
+nightBlockDelay := 30
 
-nightdnsApiKey   := "10fe27590862f3c7d0e62ca47fe93ec40bbd0b78"
-nightdnsProfile  := "5f2c95"
+nextdnsApiKey   := "10fe27590862f3c7d0e62ca47fe93ec40bbd0b78"
+nextdnsProfile  := "5f2c95"
 
-nightdnsCategories := [
+nextdnsCategories := [
     "social-networks",
     "video-streaming",
     "gaming",
 ]
-nightdnsServices := [
+nextdnsServices := [
     "youtube",
     "twitter",
     "instagram",
@@ -121,7 +118,7 @@ nightdnsServices := [
     "steam",
     "discord",
 ]
-nightdnsBlockList := [
+nextdnsBlockList := [
     ; ↓ lock_window.ahk の nextdnsBlockList と合わせて追記
 ]
 
@@ -162,6 +159,8 @@ trayMenu := A_TrayMenu
 trayMenu.Add()
 trayMenu.Add("🌙 就寝モード開始 (" nightBlockDelay " 分後にスマホをブロック)", OnNightModeStart)
 trayMenu.Add("🌙 就寝モードをキャンセル", OnNightModeCancel)
+trayMenu.Add()
+trayMenu.Add("🔁 スリープ解除ルーティンを手動実行 (" delayMinutes "分待機→クロッキー→作業)", OnManualWakeRoutine)
 
 ; トレイアイコンのダブルクリックでカウントダウンGUIを最前面に戻す
 OnMessage(0x404, OnTrayDblClick)
@@ -225,25 +224,25 @@ NightModeCountdown() {
 }
 
 NightBlock() {
-    global nightdnsApiKey, nightdnsProfile, nightBlockFlagPath
-    global nightdnsCategories, nightdnsServices, nightdnsBlockList
+    global nextdnsApiKey, nextdnsProfile, nightBlockFlagPath
+    global nextdnsCategories, nextdnsServices, nextdnsBlockList
 
     psPath := A_Temp "\ndns_night_block_now.ps1"
     try FileDelete(psPath)
 
     q  := Chr(34)
-    ps := "$headers = @{ " q "X-Api-Key" q " = " q nightdnsApiKey q " }" . "`n"
-    for cat in nightdnsCategories {
+    ps := "$headers = @{ " q "X-Api-Key" q " = " q nextdnsApiKey q " }" . "`n"
+    for cat in nextdnsCategories {
         body := "{" q "id" q ":" q cat q "," q "active" q ":true}"
-        ps .= "$body = '" body "'; try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/categories" q " -Method POST -Headers $headers -Body $body -ContentType " q "application/json" q " -UseBasicParsing | Out-Null } catch { }`n"
+        ps .= "$body = '" body "'; try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nextdnsProfile "/parentalcontrol/categories" q " -Method POST -Headers $headers -Body $body -ContentType " q "application/json" q " -UseBasicParsing | Out-Null } catch { }`n"
     }
-    for svc in nightdnsServices {
+    for svc in nextdnsServices {
         body := "{" q "id" q ":" q svc q "," q "active" q ":true}"
-        ps .= "$body = '" body "'; try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/services" q " -Method POST -Headers $headers -Body $body -ContentType " q "application/json" q " -UseBasicParsing | Out-Null } catch { }`n"
+        ps .= "$body = '" body "'; try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nextdnsProfile "/parentalcontrol/services" q " -Method POST -Headers $headers -Body $body -ContentType " q "application/json" q " -UseBasicParsing | Out-Null } catch { }`n"
     }
-    for domain in nightdnsBlockList {
+    for domain in nextdnsBlockList {
         body := "{" q "id" q ":" q domain q "," q "active" q ":true}"
-        ps .= "$body = '" body "'; try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nightdnsProfile "/denylist" q " -Method POST -Headers $headers -Body $body -ContentType " q "application/json" q " -UseBasicParsing | Out-Null } catch { }`n"
+        ps .= "$body = '" body "'; try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nextdnsProfile "/denylist" q " -Method POST -Headers $headers -Body $body -ContentType " q "application/json" q " -UseBasicParsing | Out-Null } catch { }`n"
     }
     ps .= "New-Item -Path " q nightBlockFlagPath q " -ItemType File -Force | Out-Null`n"
 
@@ -262,9 +261,10 @@ OnMessage(WM_POWERBROADCAST, OnPower)
 countdownEnd  := 0
 showAttempts  := 0
 countdownMode := ""   ; "croquis" or "main"
+wakeRoutineActive := false   ; 待機→クロッキー→作業のルーティンが進行中か（手動実行との二重起動防止用）
 
 OnPower(wParam, lParam, msg, hwnd) {
-    global countdownEnd, showAttempts, sleepLogPath, minSleepHours, delayMinutes, skipWDays
+    global countdownEnd, showAttempts, sleepLogPath, minSleepHours, delayMinutes, skipWDays, wakeRoutineActive
 
     ; スリープ開始時刻を保存
     ; ただし直前の記録から30分未満の場合は上書きしない（短時間スリープ対策）
@@ -282,24 +282,14 @@ OnPower(wParam, lParam, msg, hwnd) {
             FileAppend(A_Now, sleepLogPath)
         }
 
-        ; 就寝ブロック：指定の時間帯のスリープ時のみ発動
-        h := Integer(FormatTime(, "H"))
-        inNightHours := (nightBlockHourStart > nightBlockHourEnd)
-            ? (h >= nightBlockHourStart || h < nightBlockHourEnd)
-            : (h >= nightBlockHourStart && h < nightBlockHourEnd)
-
-        ; ★ デバッグ用：スリープイベント受信の確認ログ
-        dbgPath := A_ScriptDir "\night_debug.txt"
-        FileAppend("Sleep detected at " FormatTime(, "HH:mm") " / h=" h " / inNight=" inNightHours "`n", dbgPath)
-
-        ; 就寝ブロックは手動トリガー（トレイメニュー→就寝モード開始）に変更済み
-        ; if (inNightHours)
-        ;     ScheduleNightBlock()
-
+        ; 就寝ブロックは手動トリガー（トレイメニュー→就寝モード開始）方式のみ。
+        ; スリープ時刻に基づく自動スケジュールは行わない。
         return
     }
 
     if (wParam = PBT_APMRESUMEAUTOMATIC) {
+        if (wakeRoutineActive)   ; 既にルーティン進行中なら何もしない（多重発火対策）
+            return
 
         ; スキップ曜日チェック
         for wday in skipWDays {
@@ -316,22 +306,54 @@ OnPower(wParam, lParam, msg, hwnd) {
         if (sleepHours < minSleepHours)
             return
 
-        ; 就寝ブロックが実行されていれば起床時に解除
-        if FileExist(nightBlockFlagPath) {
-            try FileDelete(nightBlockFlagPath)
-            Run('schtasks /delete /tn "NightBlock" /f', , "Hide")
-            NightUnblock()
-        }
-
-        ; カウントダウン開始（まず通常待機、その後クロッキー）
-        countdownEnd  := A_TickCount + (delayMinutes * 60 * 1000)
-        countdownMode := "main"
-        showAttempts  := 0
-        SetTimer(UpdateCountdown, 1000)
-
-        ; GUI表示：5秒・15秒・30秒の3段階でリトライ
-        SetTimer(TryShowGui, -5000)
+        StartWakeRoutine()
     }
+}
+
+; ===== 待機→クロッキー→作業のルーティンを開始（自動起床・手動実行の共通処理）=====
+StartWakeRoutine() {
+    global countdownEnd, countdownMode, showAttempts, delayMinutes, wakeRoutineActive, nightBlockFlagPath
+
+    ; 就寝ブロックが実行されていれば起床時に解除
+    if FileExist(nightBlockFlagPath) {
+        try FileDelete(nightBlockFlagPath)
+        Run('schtasks /delete /tn "NightBlock" /f', , "Hide")
+        NightUnblock()
+    }
+
+    wakeRoutineActive := true
+
+    ; カウントダウン開始（まず通常待機、その後クロッキー）
+    countdownEnd  := A_TickCount + (delayMinutes * 60 * 1000)
+    countdownMode := "main"
+    showAttempts  := 0
+    SetTimer(UpdateCountdown, 1000)
+
+    ; GUI表示：5秒・15秒・30秒の3段階でリトライ
+    SetTimer(TryShowGui, -5000)
+}
+
+; ===== トレイメニュー：スリープ解除ルーティンの手動実行 =====
+; バグや寝落ちでスリープが検知されなかった場合などに、
+; 待機→（食事休憩を挟んで）クロッキー→作業 の流れを手動で開始します。
+; 自動起床時と異なり、曜日スキップ・最短スリープ時間のチェックは行いません。
+OnManualWakeRoutine(*) {
+    global wakeRoutineActive, phaseFile, delayMinutes
+
+    if (wakeRoutineActive) {
+        TrayTip("⚠️ 実行できません", "スリープ解除ルーティンは既に進行中です", "Mute")
+        return
+    }
+
+    phaseNow := ""
+    try phaseNow := Trim(FileRead(phaseFile))
+    if (phaseNow != "") {
+        TrayTip("⚠️ 実行できません", "作業タイマーが既に起動中のようです", "Mute")
+        return
+    }
+
+    TrayTip("🔁 スリープ解除ルーティン", delayMinutes "分待機 → クロッキー → 作業 を開始します", "Mute")
+    StartWakeRoutine()
 }
 
 ; ===== GUI表示リトライ（変更不要）=====
@@ -572,76 +594,25 @@ SendCroquisWeeklyReport() {
     ScheduleCroquisReport()
 }
 
-; ===== 就寝ブロック：起動時にPS1を事前生成（変更不要）=====
-; スリープ直前は処理時間が極短のため、PS1を起動時に生成しておく
-nightBlockPsPath := A_Temp "\ndns_night_block.ps1"
-{
-    _q  := Chr(34)
-    _ps := "$headers = @{ " _q "X-Api-Key" _q " = " _q nightdnsApiKey _q " }" . "`n"
-    for _cat in nightdnsCategories {
-        _body := "{" _q "id" _q ":" _q _cat _q "," _q "active" _q ":true}"
-        _ps .= "$body = '" _body "'; try { Invoke-WebRequest -Uri " _q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/categories" _q " -Method POST -Headers $headers -Body $body -ContentType " _q "application/json" _q " -UseBasicParsing | Out-Null } catch { }`n"
-    }
-    for _svc in nightdnsServices {
-        _body := "{" _q "id" _q ":" _q _svc _q "," _q "active" _q ":true}"
-        _ps .= "$body = '" _body "'; try { Invoke-WebRequest -Uri " _q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/services" _q " -Method POST -Headers $headers -Body $body -ContentType " _q "application/json" _q " -UseBasicParsing | Out-Null } catch { }`n"
-    }
-    for _domain in nightdnsBlockList {
-        _body := "{" _q "id" _q ":" _q _domain _q "," _q "active" _q ":true}"
-        _ps .= "$body = '" _body "'; try { Invoke-WebRequest -Uri " _q "https://api.nextdns.io/profiles/" nightdnsProfile "/denylist" _q " -Method POST -Headers $headers -Body $body -ContentType " _q "application/json" _q " -UseBasicParsing | Out-Null } catch { }`n"
-    }
-    ; Wi-Fi再接続を待ってからAPI呼び出し、ログに結果を記録
-    _logPath := A_ScriptDir "\night_block_result.txt"
-    _lq := _q
-    _ps .= "Add-Content " _lq _logPath _lq " " _lq "Started: $(Get-Date)" _lq "`n"
-    _ps .= "Start-Sleep -Seconds 20`n"
-    _ps .= "Add-Content " _lq _logPath _lq " " _lq "Network wait done" _lq "`n"
-    _ps .= "try { Invoke-WebRequest -Uri " _q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/categories/social-networks" _q " -Method DELETE -Headers " _q "$headers" _q " -UseBasicParsing | Out-Null; Add-Content " _lq _logPath _lq " " _lq "Pre-cleanup OK" _lq " } catch { Add-Content " _lq _logPath _lq " " _lq "Pre-cleanup ERR" _lq " }`n"
-    _ps .= "try { $r = Invoke-WebRequest -Uri " _q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/categories" _q " -Method POST -Headers " _q "$headers" _q " -Body " _q '{"id":"social-networks","active":true}' _q " -ContentType " _q "application/json" _q " -UseBasicParsing; Add-Content " _lq _logPath _lq " " _lq "API OK: $($r.StatusCode)" _lq " } catch { Add-Content " _lq _logPath _lq " (" _lq "API ERR: " _lq " + $_.Exception.Message) }`n"
-    _ps .= "New-Item -Path " _q nightBlockFlagPath _q " -ItemType File -Force | Out-Null`n"
-    _ps .= "Add-Content " _lq _logPath _lq " " _lq "Flag created. Done." _lq "`n"
-    try FileDelete(nightBlockPsPath)
-    FileAppend(_ps, nightBlockPsPath, "UTF-8-RAW")
-}
-
-; ===== 就寝ブロック：スケジュール登録（スリープ時に呼ばれる・変更不要）=====
-; PS1は事前生成済みのため、タスク登録コマンドのみ実行する
-ScheduleNightBlock() {
-    global nightBlockDelay, nightBlockPsPath, nightBlockFlagPath
-
-    triggerTime := FormatTime(DateAdd(A_Now, nightBlockDelay, "Minutes"), "HH:mm")
-
-    ; ★ デバッグ用：PowerShellウィンドウを表示して登録結果を確認します
-    q  := Chr(34)
-    q2 := Chr(96) . Chr(34)
-    registerCmd := "powershell -ExecutionPolicy Bypass -Command "
-        . q . "$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-WindowStyle Hidden -ExecutionPolicy Bypass -File " q2 nightBlockPsPath q2 "'; "
-        . "$t = New-ScheduledTaskTrigger -Once -At '" triggerTime "'; "
-        . "$s = New-ScheduledTaskSettingsSet -WakeToRun; "
-        . "Register-ScheduledTask -TaskName 'NightBlock' -Action $a -Trigger $t -Settings $s -Force; "
-        . "Write-Host 'OK: NightBlock registered for " triggerTime "'; Start-Sleep 4" . q
-    Run(registerCmd)
-}
-
 ; ===== 就寝ブロック：起床時解除（変更不要）=====
 NightUnblock() {
-    global nightdnsApiKey, nightdnsProfile
-    global nightdnsCategories, nightdnsServices, nightdnsBlockList
+    global nextdnsApiKey, nextdnsProfile
+    global nextdnsCategories, nextdnsServices, nextdnsBlockList
 
     psPath := A_Temp "\ndns_night_unblock.ps1"
     try FileDelete(psPath)
 
     q  := Chr(34)
-    ps := "$headers = @{ " q "X-Api-Key" q " = " q nightdnsApiKey q " }" . "`n"
+    ps := "$headers = @{ " q "X-Api-Key" q " = " q nextdnsApiKey q " }" . "`n"
 
-    for cat in nightdnsCategories {
-        ps .= "try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/categories/" cat q " -Method DELETE -Headers $headers -UseBasicParsing | Out-Null } catch { }`n"
+    for cat in nextdnsCategories {
+        ps .= "try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nextdnsProfile "/parentalcontrol/categories/" cat q " -Method DELETE -Headers $headers -UseBasicParsing | Out-Null } catch { }`n"
     }
-    for svc in nightdnsServices {
-        ps .= "try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nightdnsProfile "/parentalcontrol/services/" svc q " -Method DELETE -Headers $headers -UseBasicParsing | Out-Null } catch { }`n"
+    for svc in nextdnsServices {
+        ps .= "try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nextdnsProfile "/parentalcontrol/services/" svc q " -Method DELETE -Headers $headers -UseBasicParsing | Out-Null } catch { }`n"
     }
-    for domain in nightdnsBlockList {
-        ps .= "try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nightdnsProfile "/denylist/" domain q " -Method DELETE -Headers $headers -UseBasicParsing | Out-Null } catch { }`n"
+    for domain in nextdnsBlockList {
+        ps .= "try { Invoke-WebRequest -Uri " q "https://api.nextdns.io/profiles/" nextdnsProfile "/denylist/" domain q " -Method DELETE -Headers $headers -UseBasicParsing | Out-Null } catch { }`n"
     }
 
     FileAppend(ps, psPath, "UTF-8-RAW")
@@ -879,7 +850,8 @@ LaunchMainAfterCroquis() {
 }
 
 LaunchMain() {
-    global scriptPath
+    global scriptPath, wakeRoutineActive
+    wakeRoutineActive := false   ; 待機→クロッキー→作業のルーティンはここで完了
     Run('"' scriptPath '" /auto')
 }
 
