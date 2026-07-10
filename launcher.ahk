@@ -964,12 +964,12 @@ SetTimer(CheckAbsence, 30000)
 CheckAbsence() {
     global sabo, absentThresholdMin, phaseFile, saboLogDir
 
-    ; ロックフェーズ・中休みフェーズ中のみ計測
+    ; ロックフェーズ中のみ計測
     phase := ""
     try phase := Trim(FileRead(phaseFile))
-    if (phase != "lock" && phase != "intermission") {
+    if (phase != "lock") {
         ; 監視対象外フェーズに入ったら離席状態をリセット
-        ; （運動・食事休憩中の無操作が復帰後にサボりとして誤記録されるのを防ぐ）
+        ; （運動・食事休憩・中休み・通常休憩中の無操作が復帰後にサボりとして誤記録されるのを防ぐ）
         sabo.isAbsent       := false
         sabo.warnedThisIdle := false
         sabo.absentStartMs  := 0

@@ -479,9 +479,12 @@ focusModeAutoChance  := 50
 ;        0 にすると機能を無効化します。
 ;
 ;    作業ウィンドウの指定は workWindowTitles / workWindowProcesses を使います。
-;    ロック中のみ計測します（休憩・食事中は計測しません）。
+;    ロック中・中休み中のみ計測します（休憩・食事中は計測しません）。
+;    クロッキー（別プロセスとして起動）とまたがっても計測が引き継がれるよう、
+;    work_goal.txt に随時保存し、起動のたびに本日分を読み込みます。
 ; ================================================================
 totalWorkGoalMinutes := 150   ; 2時間半
+workGoalLogPath      := A_ScriptDir "\work_goal.txt"
 
 ; ================================================================
 ; ★ 休憩延期の設定
@@ -515,6 +518,20 @@ workWindowProcesses := [
     ; "Photoshop.exe",
 ]
 breakDeferGraceSecs := 5
+
+; 本日の作業ノルマ進捗を読み込む（日付が変わっていたらリセット）
+; クロッキー用プロセスと通常作業用プロセスは別々に起動されるため、
+; メモリ上の値だけでは引き継がれない。ファイル経由で引き継ぐ。
+_workActiveMs     := 0
+_workGoalReached  := false
+try {
+    _workGoalData := StrSplit(FileRead(workGoalLogPath), "|")
+    if (_workGoalData[1] = FormatTime(, "yyyyMMdd")) {
+        _workActiveMs    := Integer(_workGoalData[2])
+        _workGoalReached := (_workGoalData[3] = "1")
+    }
+}
+
 global g := {
     phase:             "",
     endTick:           0,
@@ -533,8 +550,8 @@ global g := {
     breakDeferSince:      0,      ; 作業外ウィンドウになった最初の TickCount
     fakeEndTick:          0,      ; 偽装カウントダウンの終了 TickCount
     hadIntermission:      false,  ; 一度でも中休みを経験したか
-    activeWorkMs:         0,      ; 作業ウィンドウがアクティブだった累計時間（ms）
-    workGoalReached:      false,  ; 作業達成フラグ
+    activeWorkMs:         _workActiveMs,      ; 作業ウィンドウがアクティブだった累計時間（ms）
+    workGoalReached:      _workGoalReached,   ; 作業達成フラグ
     lastActiveCheck:      0,      ; 前回の作業時間チェックのTickCount
     focusMode:            false,  ; 集中モード中かどうか
     focusModeIsAuto:      false,  ; true=自動発動 / false=手動発動
@@ -1077,7 +1094,7 @@ UpdateWorkGoalTip()   ; 起動直後にも初期値を表示しておく
 SetTimer(CheckActiveWork, 5000)
 
 CheckActiveWork() {
-    global g, totalWorkGoalMinutes
+    global g, totalWorkGoalMinutes, workGoalLogPath
 
     ; ロックフェーズ・中休み中・一時停止していないときのみ計測
     ; （中休み中も計測対象に含めないと「中休み中に達成した場合も即座に表示」が機能しないため）
@@ -1103,6 +1120,10 @@ CheckActiveWork() {
         if (g.phase = "intermission")
             workDoneBtn.Visible := true
     }
+
+    ; ファイルに保存（クロッキー→通常作業など、プロセスをまたいで引き継ぐため）
+    try FileDelete(workGoalLogPath)
+    FileAppend(FormatTime(, "yyyyMMdd") "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0"), workGoalLogPath)
 
     UpdateWorkGoalTip()
 }
