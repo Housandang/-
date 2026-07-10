@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force   ; 既存のインスタンスを確認なしで自動終了・上書き
 
 ; ================================================================
@@ -228,8 +228,8 @@ autoTotalSets := 3
 ; ================================================================
 croquisLockSecs    := 1500   ; 25分
 croquisShotDir     := A_ScriptDir "\croquis_shots"   ; キャプチャ保存先
-croquisCaptureWait := 10     ; タイマー終了からスクショ撮影までの猶予（秒）
-croquisBreakSecs   := 300    ; クロッキー後の休憩時間（秒）
+croquisCaptureWait := 180     ; タイマー終了からスクショ撮影までの猶予（秒）
+croquisBreakSecs := 600    ; クロッキー後の休憩時間（秒）
 
 ; ================================================================
 ; ★ 中休みモードの設定
@@ -468,7 +468,7 @@ focusModeAllowProcesses := [
 ;            0 なら自動発動しない（手動のみ）
 ; ================================================================
 focusModeAutoFromSet := 3
-focusModeAutoChance  := 50
+focusModeAutoChance := 30
 
 ; ================================================================
 ; ★ 作業達成時間の設定
