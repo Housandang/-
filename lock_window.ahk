@@ -36,11 +36,25 @@ CleanupPhaseFile(reason, code) {
     if (actualPhase != "croquis_done")
         WritePhase("")
     NextDnsUnblock()
-    ; ロック中に終了した場合のみ Discord に通知（クロッキー中の終了は除く）
-    if (currentPhase = "lock" && !isCroquis) {
-        setInfo := ""
-        try setInfo := " [Set " g.currentSet "/" g.totalSets "]"
+
+    ; クロッキー中の終了は対象外
+    if (isCroquis)
+        return
+
+    goalReached := false
+    try goalReached := g.workGoalReached
+
+    setInfo := ""
+    try setInfo := " [Set " g.currentSet "/" g.totalSets "]"
+
+    if (currentPhase = "lock") {
+        ; ロック中の終了は常に通知
         SendDiscordAlert("⚠️ **ロック中にタイマーを終了しました**" setInfo " " FormatTime(, "HH:mm"))
+    } else if ((currentPhase = "break" || currentPhase = "intermission") && !goalReached) {
+        ; 休憩・中休み中でも、作業ノルマ（totalWorkGoalMinutes）未達成なら通知
+        ; 達成済みなら休憩中の終了は正当な終了とみなし、通知しない
+        label := (currentPhase = "intermission") ? "中休み" : "休憩"
+        SendDiscordAlert("⚠️ **ノルマ未達成のまま" label "中にタイマーを終了しました**" setInfo " " FormatTime(, "HH:mm"))
     }
 }
 
@@ -1038,6 +1052,27 @@ FocusModeRestore() {
 
 
 
+; ===== 作業ノルマの残り時間をトレイアイコンのツールチップに表示（変更不要）=====
+; ロック中・中休み中・休憩中を問わず、常に直近の状態を表示し続ける
+UpdateWorkGoalTip() {
+    global g, totalWorkGoalMinutes
+
+    if (totalWorkGoalMinutes = 0)
+        return
+
+    if (g.workGoalReached) {
+        A_IconTip := "🎯 本日の作業ノルマ達成済み"
+        return
+    }
+
+    remainMin := Ceil(Max(0, totalWorkGoalMinutes * 60000 - g.activeWorkMs) / 60000)
+    h := remainMin // 60
+    m := Mod(remainMin, 60)
+    label := (h > 0) ? h "時間" m "分" : m "分"
+    A_IconTip := "🎯 ノルマまであと " label
+}
+UpdateWorkGoalTip()   ; 起動直後にも初期値を表示しておく
+
 ; ===== 作業時間計測：5秒ごとに監視（変更不要）=====
 SetTimer(CheckActiveWork, 5000)
 
@@ -1068,6 +1103,8 @@ CheckActiveWork() {
         if (g.phase = "intermission")
             workDoneBtn.Visible := true
     }
+
+    UpdateWorkGoalTip()
 }
 
 ; ===== ゲームプレイ時間監視：10秒ごとに（変更不要）=====
