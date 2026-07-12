@@ -891,7 +891,9 @@ global sabo := {
     absentStartMs:  0,
     saboCount:      0,
     warnedThisIdle: false,  ; 今回の離席で警告済みかどうか
-    entries:        []      ; 当日のサボりログ（23時にファイルへ書き出し）
+    entries:        [],     ; 当日のサボりログ（23時にファイルへ書き出し）
+    lastPhase:      "",     ; 前回チェック時のフェーズ（lock突入検知用）
+    lockStartTick:  0       ; 今回のlockフェーズが始まったTickCount
 }
 
 ; ===== ログ保存先ディレクトリを作成（変更不要）=====
@@ -975,10 +977,21 @@ CheckAbsence() {
         sabo.isAbsent       := false
         sabo.warnedThisIdle := false
         sabo.absentStartMs  := 0
+        sabo.lastPhase      := phase
+        sabo.lockStartTick  := 0
         return
     }
 
-    idleMs      := A_TimeIdlePhysical
+    ; lock以外からlockに切り替わった瞬間を記録する。
+    ; （休憩・昼休み・運動等の間に離席していた時間は、lock再開直後の
+    ;   A_TimeIdlePhysical にそのまま残ってしまうため、これを差し引かないと
+    ;   「休憩中に離席していた分」まで丸ごとサボりとして誤検知してしまう）
+    if (sabo.lastPhase != "lock")
+        sabo.lockStartTick := A_TickCount
+    sabo.lastPhase := phase
+
+    ; 実際の無操作時間のうち、「今回のlock開始以降」の分だけを対象にする
+    idleMs      := Min(A_TimeIdlePhysical, A_TickCount - sabo.lockStartTick)
     warnMs      := (absentThresholdMin - 1) * 60000   ; 警告タイミング（閾値の1分前）
     thresholdMs := absentThresholdMin * 60000
 
