@@ -512,13 +512,15 @@ SendCroquisWeeklyReport() {
     for d, _ in dateSet
         dateList.Push(d)
 
-    ; 日付を昇順ソート（シンプルな文字列比較で可）
+    ; 日付を昇順ソート（StrCompareで明示的に文字列比較する）
+    ; ※ "-" 区切りの日付文字列同士を ">" で直接比較すると、AHKv2側の解釈次第で
+    ;   "Expected a Number but got a String" エラーになることがあるため注意
     n := dateList.Length
     loop n - 1 {
         i := A_Index
         loop n - i {
             j := A_Index + i
-            if (dateList[j-1] > dateList[j]) {
+            if (StrCompare(dateList[j-1], dateList[j]) > 0) {
                 tmp          := dateList[j-1]
                 dateList[j-1] := dateList[j]
                 dateList[j]   := tmp
