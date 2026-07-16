@@ -228,8 +228,8 @@ autoTotalSets := 3
 ; ================================================================
 croquisLockSecs    := 1500   ; 25分
 croquisShotDir     := A_ScriptDir "\croquis_shots"   ; キャプチャ保存先
-croquisCaptureWait := 180     ; タイマー終了からスクショ撮影までの猶予（秒）
-croquisBreakSecs := 600    ; クロッキー後の休憩時間（秒）
+croquisCaptureWait := 180    ; タイマー終了からスクショ撮影までの猶予（秒）
+croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
 
 ; ================================================================
 ; ★ 中休みモードの設定
@@ -242,7 +242,7 @@ croquisBreakSecs := 600    ; クロッキー後の休憩時間（秒）
 ;    intermissionAddSets
 ;      → 時間切れ時に追加するセット数
 ; ================================================================
-intermissionMinutes := 15
+intermissionMinutes := 30
 intermissionAddSets := 2
 
 ; ================================================================
@@ -468,7 +468,7 @@ focusModeAllowProcesses := [
 ;            0 なら自動発動しない（手動のみ）
 ; ================================================================
 focusModeAutoFromSet := 3
-focusModeAutoChance := 30
+focusModeAutoChance := 25
 
 ; ================================================================
 ; ★ 作業達成時間の設定
@@ -483,7 +483,7 @@ focusModeAutoChance := 30
 ;    クロッキー（別プロセスとして起動）とまたがっても計測が引き継がれるよう、
 ;    work_goal.txt に随時保存し、起動のたびに本日分を読み込みます。
 ; ================================================================
-totalWorkGoalMinutes := 150   ; 2時間半
+totalWorkGoalMinutes := 125   ; 2時間半
 workGoalLogPath      := A_ScriptDir "\work_goal.txt"
 
 ; ================================================================
@@ -1432,20 +1432,25 @@ ResumeAfterExercise() {
 ; ===== 起動モード判定（変更不要）=====
 global isAuto     := false
 global isCroquis  := false
-global croquisArg := {lockSecs: 1500, sets: 1, interSecs: 0}   ; デフォルトはモード1
+global croquisArg := {lockSecs: 1500, sets: 1, interSecs: 0, mode: 1}   ; デフォルトはモード1
 
 for arg in A_Args {
     if (arg = "/auto")
         isAuto := true
     if (SubStr(arg, 1, 8) = "/croquis") {
         isCroquis := true
-        ; /croquis:lockSecs:sets:interSecs の形式で受け取る
+        ; /croquis:lockSecs:sets:interSecs:mode の形式で受け取る
         parts := StrSplit(arg, ":")
         if (parts.Length >= 4) {
             croquisArg.lockSecs  := Integer(parts[2])
             croquisArg.sets      := Integer(parts[3])
             croquisArg.interSecs := Integer(parts[4])
         }
+        ; mode（5番目）は次セットの画像選択で使うフォルダの判定に使う。
+        ; 旧バージョンのlauncher.ahk（modeを渡さない）からの起動でも動くよう、
+        ; 省略時はモード1として扱う。
+        if (parts.Length >= 5)
+            croquisArg.mode := Integer(parts[5])
     }
 }
 
@@ -1549,10 +1554,14 @@ StartPomodoro(btn, *) {
 ; ===== セット間の次画像選択（変更不要）=====
 ; launcher の PickCroquisImage と同じロジック。lock_window 側から呼ぶ用。
 PickNextCroquisImage() {
-    global croquisShotDir   ; croquisFolder パスを共有するために設定変数が必要
-    ; lock_window.ahk には croquisFolder がないため、croquis_used.txt と同じ場所から推測
+    global croquisArg   ; 起動時に launcher.ahk から渡されたモード番号を使う
+
+    mode   := croquisArg.mode
+    ; launcher.ahk側のフォルダ命名規則（croquis_models_<mode>）と合わせる
+    folder := A_ScriptDir "\croquis_models_" mode
+    ; 使用済みログは全モード共通の1ファイル（launcher.ahk側と共有）。
+    ; モードをまたいで同じ画像が二度使われないようにするため一元管理する。
     usedLogPath := A_ScriptDir "\croquis_used.txt"
-    folder      := A_ScriptDir "\croquis_models"   ; デフォルトパス
 
     exts    := ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]
     allImgs := []
@@ -1585,8 +1594,24 @@ PickNextCroquisImage() {
             unused.Push(img)
     }
 
+    ; このモードのフォルダを全部使い切ったら、共有リストから
+    ; 「このモードの画像分だけ」を取り除いてリセットする（他モードの履歴は残す）
     if (unused.Length = 0) {
+        remaining := []
+        for u in usedList {
+            belongsToThisMode := false
+            for img in allImgs {
+                if (StrLower(u) = StrLower(img)) {
+                    belongsToThisMode := true
+                    break
+                }
+            }
+            if (!belongsToThisMode)
+                remaining.Push(u)
+        }
         try FileDelete(usedLogPath)
+        for r in remaining
+            FileAppend(r "`n", usedLogPath)
         unused := allImgs
     }
 
@@ -1882,15 +1907,23 @@ StartNextCroquisSet() {
 ; ===== クロッキーセット間休憩（変更不要）=====
 ; 次のモデル画像をコピーしてから休憩カウントダウン、その後次セットへ
 StartCroquisInterSet(doneSet, totalSets, lockSecs, interSecs) {
-    global g, timerGui, timerTitle, timerCount, timerSub
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisArg
 
-    ; 次の画像をコピー（launcher 側の PickCroquisImage は使えないので
-    ; current_phase.txt 経由で launcher に要求する方式ではなく、
-    ; lock_window 側でファイルを直接選ぶ）
-    nextImg := PickNextCroquisImage()
-    if (nextImg != "") {
-        CopyNextCroquisImage(nextImg)
-        TrayTip("🎨 次のモデル", "クリップボードにコピーしました。サブビューに貼り付けてください", "Mute")
+    ; モード4（記憶描画モード）は2セット目に新しい画像を選ばない。
+    ; 1セット目のモデルを記憶を頼りに描く練習のため。
+    skipNextImage := (croquisArg.mode = 4)
+
+    if (!skipNextImage) {
+        ; 次の画像をコピー（launcher 側の PickCroquisImage は使えないので
+        ; current_phase.txt 経由で launcher に要求する方式ではなく、
+        ; lock_window 側でファイルを直接選ぶ）
+        nextImg := PickNextCroquisImage()
+        if (nextImg != "") {
+            CopyNextCroquisImage(nextImg)
+            TrayTip("🎨 次のモデル", "クリップボードにコピーしました。サブビューに貼り付けてください", "Mute")
+        }
+    } else {
+        TrayTip("🧠 記憶で描く", "今回は新しい画像を見ずに、記憶を頼りに描いてみましょう", "Mute")
     }
 
     g.generation += 1
@@ -1902,7 +1935,7 @@ StartCroquisInterSet(doneSet, totalSets, lockSecs, interSecs) {
     nextSet := doneSet + 1
     timerGui.BackColor := "4A148C"   ; 薄紫：セット間
     timerTitle.Value   := "🎨 次のセットまで " nextSet "/" totalSets
-    timerSub.Value     := "次のモデルをサブビューへ"
+    timerSub.Value     := skipNextImage ? "記憶を頼りに描いてみましょう" : "次のモデルをサブビューへ"
     SoundPlay("*48")
 
     SetTimer(InterSetTick, 300)

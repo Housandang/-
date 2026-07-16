@@ -46,9 +46,15 @@ mealPauseEndM   := 30
 ;        1 … 25分 × 1枚（デフォルト）
 ;        2 … 15分 × 2枚（セット間に2分休憩）
 ;        3 …  5分 × 5枚（セット間に1分休憩）
+;        4 … 15分 × 2枚相当（モード2と同じ時間割だが、2セット目は画像を選ばない。
+;            1セット目のモデルを記憶を頼りに描く練習用）
+;        0 … ランダムモード（起動のたびに1〜4のいずれかをランダムに選択）
 ;
-;    croquisFolder
-;      → モデル画像が入ったフォルダのパス
+;    croquisModeParams の folder
+;      → モードごとのモデル画像フォルダのパス。
+;        モード1は croquis_models_1、モード2は croquis_models_2、
+;        モード3は croquis_models_3 のように、モードごとに別フォルダから
+;        ランダムに画像を選びます（フォルダは事前に作成し、画像を入れておくこと）
 ;
 ;    croquisDelayMinutes
 ;      → スリープ復帰後、クロッキー開始までの待機時間（分）
@@ -56,17 +62,20 @@ mealPauseEndM   := 30
 ;    croquisUsedLog / croquisShotDir
 ;      → 変更不要
 ; ================================================================
-croquisMode := 2
-croquisFolder       := A_ScriptDir "\croquis_models"
+croquisMode := 0
 croquisDelayMinutes := 5
-croquisUsedLog      := A_ScriptDir "\croquis_used.txt"
+croquisUsedLog      := A_ScriptDir "\croquis_used.txt"   ; 全モード共通の使用済みリスト（1ファイルで一元管理）
 croquisShotDir      := A_ScriptDir "\croquis_shots"   ; lock_window.ahk と合わせること
 
-; モード別パラメータ（変更不要）
+; モード別パラメータ（フォルダもここでモードごとに指定）
 croquisModeParams := Map(
-    1, {lockSecs: 1500, sets: 1, interSecs:   0},
-    2, {lockSecs:  900, sets: 2, interSecs: 120},
-    3, {lockSecs:  300, sets: 5, interSecs:  60}
+    1, {lockSecs: 1500, sets: 1, interSecs:   0, folder: A_ScriptDir "\croquis_models_1"},
+    2, {lockSecs:  900, sets: 2, interSecs: 120, folder: A_ScriptDir "\croquis_models_2"},
+    3, {lockSecs:  300, sets: 5, interSecs:  60, folder: A_ScriptDir "\croquis_models_3"},
+    ; モード4：時間割はモード2と同じ（15分×2セット）。1セット目は通常どおり画像を見て描き、
+    ; 2セット目は新しい画像を選ばず、1セット目のモデルを記憶を頼りに描く練習用モード。
+    ; そのため画像プールはモード2と共用（croquis_models_2）でよい。
+    4, {lockSecs:  900, sets: 2, interSecs: 120, folder: A_ScriptDir "\croquis_models_2"}
 )
 
 ; ================================================================
@@ -449,6 +458,16 @@ ScheduleDailyLog()
 ; 起動時にクロッキー週次レポートタイマーをセット
 ScheduleCroquisReport()
 
+; ===== テスト用：週次レポートを今すぐ送信して動作確認する =====
+; 使い方: launcher.ahk /test-croquis-report
+; ※ #SingleInstance Force のため、実行中のlauncher.ahkはこの起動によって
+;   一度終了し、この新しいプロセスに置き換わります（通常の起動処理はそのまま続行されます）。
+;   本番のDiscordチャンネルに実際に送信されるので注意してください。
+if (A_Args.Length > 0 && A_Args[1] = "/test-croquis-report") {
+    TrayTip("🧪 テスト送信", "クロッキー週次レポートを今すぐ送信します…", "Mute")
+    SendCroquisWeeklyReport(true)
+}
+
 ; ===== クロッキー週次レポート：スケジュール（変更不要）=====
 ScheduleCroquisReport() {
     global croquisReportWDay, croquisReportHour
@@ -478,11 +497,19 @@ ScheduleCroquisReport() {
 }
 
 ; ===== クロッキー週次レポート送信（変更不要）=====
-SendCroquisWeeklyReport() {
+; isTest=true の場合、送信結果ログをMsgBoxで表示する（動作確認用）
+SendCroquisWeeklyReport(isTest := false) {
     global croquisShotDir, croquisReportWebhook
 
+    resultLogPath := A_ScriptDir "\croquis_report_log.txt"
+    try FileDelete(resultLogPath)
+
     if (croquisReportWebhook = "") {
-        ScheduleCroquisReport()   ; 次週へ
+        FileAppend(FormatTime(, "HH:mm:ss") " croquisReportWebhookが未設定のため送信をスキップしました`n", resultLogPath)
+        if (isTest)
+            MsgBox("croquisReportWebhook が空のため送信できません。`n設定を確認してください。", "クロッキー週次レポート テスト結果")
+        if (!isTest)
+            ScheduleCroquisReport()   ; 次週へ
         return
     }
 
@@ -538,24 +565,40 @@ SendCroquisWeeklyReport() {
     msgText   := "🎨 **クロッキー週次レポート** (" weekStart " ～ " weekEnd ")`n"
                 . "今週の枚数：**" count " 枚**`n"
                 . (dateText != "" ? "実施日：" dateText : "今週は0枚でした")
+                . (isTest ? "`n（テスト送信）" : "")
+
+    FileAppend(FormatTime(, "HH:mm:ss") " 対象画像 " count " 枚を検出（" dateText "）`n", resultLogPath)
 
     if (count = 0) {
         ; 画像なしの場合はテキストのみ送信
         SendDiscordAlert(msgText)
-        ScheduleCroquisReport()
+        FileAppend(FormatTime(, "HH:mm:ss") " 画像0枚のためテキストのみ送信しました`n", resultLogPath)
+        if (isTest)
+            MsgBox(FileRead(resultLogPath), "クロッキー週次レポート テスト結果")
+        if (!isTest)
+            ScheduleCroquisReport()
         return
     }
 
     ; PowerShellで画像をmultipart送信
     q  := Chr(34)
     ps := "Add-Type -AssemblyName System.Net.Http`n"
+    ps .= "$logPath = " q resultLogPath q "`n"
+    ps .= "function Log(`$msg) { Add-Content -Path `$logPath -Value ((Get-Date -Format " q "HH:mm:ss" q ") + ' ' + `$msg) }`n"
+    ps .= "Log('PowerShell側の送信処理を開始')`n"
     ps .= "$url    = " q croquisReportWebhook q "`n"
     ps .= "$client = [System.Net.Http.HttpClient]::new()`n"
     ps .= "$form   = [System.Net.Http.MultipartFormDataContent]::new()`n"
 
     ; テキスト部分（Content-Type を明示）
-    safeMsg := StrReplace(StrReplace(msgText, '"', "'"), "`n", "\n")
-    ps .= "$payload = [System.Net.Http.StringContent]::new(" q '{"content":"' safeMsg '"}' q ", [System.Text.Encoding]::UTF8, " q "application/json" q ")`n"
+    ; PowerShell側の ConvertTo-Json に任せて安全にJSON化する。
+    ; （手動で {"content":"..."} を組み立てると、JSON用の " とPowerShell文字列の
+    ;   " が衝突してスクリプト自体がパースエラーになり、何も送信されず
+    ;   ログにも何も残らないという状態になっていた）
+    psSafeMsg := StrReplace(msgText, "'", "''")   ; PowerShellのシングルクォート内エスケープ
+    ps .= "$msgText  = '" psSafeMsg "'`n"
+    ps .= "$jsonBody = (@{ content = $msgText } | ConvertTo-Json -Compress)`n"
+    ps .= "$payload = [System.Net.Http.StringContent]::new(`$jsonBody, [System.Text.Encoding]::UTF8, " q "application/json" q ")`n"
     ps .= "$payload.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse(" q "application/json" q ")`n"
     ps .= "$form.Add(`$payload, " q "payload_json" q ")`n"
 
@@ -572,28 +615,51 @@ SendCroquisWeeklyReport() {
 
     for i, path in attachShots {
         fname := SubStr(path, InStr(path, "\",, -1) + 1)
-        ps .= "$bytes" i " = [System.IO.File]::ReadAllBytes(" q path q ")`n"
-        ps .= "$mem"   i " = [System.Net.Http.ByteArrayContent]::new(`$bytes" i ")`n"
-        ps .= "$mem"   i ".Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse(" q "image/png" q ")`n"
-        ps .= "$form.Add(`$mem" i ", " q "files[" (i-1) "]" q ", " q fname q ")`n"
+        ps .= "try {`n"
+        ps .= "    $bytes" i " = [System.IO.File]::ReadAllBytes(" q path q ")`n"
+        ps .= "    $mem"   i " = [System.Net.Http.ByteArrayContent]::new(`$bytes" i ")`n"
+        ps .= "    $mem"   i ".Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse(" q "image/png" q ")`n"
+        ps .= "    $form.Add(`$mem" i ", " q "files[" (i-1) "]" q ", " q fname q ")`n"
+        ps .= "    Log('画像読込OK: " fname "')`n"
+        ps .= "} catch {`n"
+        ps .= "    Log('画像読込失敗: " fname " - ' + `$_.Exception.Message)`n"
+        ps .= "}`n"
     }
 
     ps .= "try {`n"
     ps .= "    $resp = $client.PostAsync(`$url, `$form).Result`n"
-    ps .= "    if (-not $resp.IsSuccessStatusCode) { Write-Host ('HTTP ' + [int]$resp.StatusCode + ': ' + $resp.ReasonPhrase) }`n"
-    ps .= "} catch { Write-Host $_.Exception.Message }`n"
+    ps .= "    if ($resp.IsSuccessStatusCode) {`n"
+    ps .= "        Log('送信成功: HTTP ' + [int]$resp.StatusCode)`n"
+    ps .= "    } else {`n"
+    ps .= "        $body = $resp.Content.ReadAsStringAsync().Result`n"
+    ps .= "        Log('送信失敗: HTTP ' + [int]$resp.StatusCode + ' ' + $resp.ReasonPhrase + ' / レスポンス: ' + $body)`n"
+    ps .= "    }`n"
+    ps .= "} catch {`n"
+    ps .= "    Log('例外発生: ' + $_.Exception.Message)`n"
+    ps .= "}`n"
     ps .= "$client.Dispose()`n"
+    ps .= "Log('PowerShell側の送信処理が終了')`n"
 
     psPath := A_Temp "\croquis_weekly.ps1"
     try FileDelete(psPath)
-    FileAppend(ps, psPath, "UTF-8-RAW")
+    ; BOMなしのUTF-8だと、Windows PowerShell(5.1)がスクリプト内の日本語部分を
+    ; システムのANSIコードページとして誤読し、文字列が壊れてパースエラーになることがある。
+    ; BOM付きUTF-8で書き出すことでUTF-8として確実に認識させる。
+    FileAppend(ps, psPath, "UTF-8")
     ; RunWait で完了を待ってからTrayTipを表示
     RunWait('powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File "' psPath '"',, "Hide")
 
-    TrayTip("🎨 週次レポート送信", count " 枚をDiscordに送信しました", "Mute")
+    TrayTip("🎨 週次レポート送信", count " 枚を送信処理しました（詳細: " resultLogPath "）", "Mute")
 
-    ; 次週へ再スケジュール
-    ScheduleCroquisReport()
+    if (isTest) {
+        logContent := ""
+        try logContent := FileRead(resultLogPath)
+        MsgBox(logContent, "クロッキー週次レポート テスト結果")
+    }
+
+    ; 次週へ再スケジュール（テスト時は本来のスケジュールを崩さない）
+    if (!isTest)
+        ScheduleCroquisReport()
 }
 
 ; ===== 就寝ブロック：起床時解除（変更不要）=====
@@ -729,8 +795,11 @@ CopyImageToClipboard(path) {
 
 ; ===== クロッキー：画像選択（変更不要）=====
 ; 指定フォルダからランダムに1枚選ぶ。全周済みならリセットして再選択。
-PickCroquisImage() {
-    global croquisFolder, croquisUsedLog
+; mode番号を受け取り、そのモード専用フォルダ・使用済みログを使う
+PickCroquisImage(mode) {
+    global croquisModeParams, croquisUsedLog
+
+    folder := croquisModeParams.Has(mode) ? croquisModeParams[mode].folder : croquisModeParams[1].folder
 
     ; 対象拡張子
     exts := ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]
@@ -738,7 +807,7 @@ PickCroquisImage() {
     ; フォルダ内の全画像を列挙
     allImages := []
     for ext in exts {
-        loop files croquisFolder "\" ext {
+        loop files folder "\" ext {
             allImages.Push(A_LoopFileName)
         }
     }
@@ -746,7 +815,8 @@ PickCroquisImage() {
     if (allImages.Length = 0)
         return ""   ; 画像なし
 
-    ; 使用済みリストを読み込む
+    ; 使用済みリストを読み込む（モードをまたいで一元管理。同じ画像がどのモードでも
+    ; 二度使われないようにするため、croquisUsedLog は全モード共通の1ファイル）
     usedList := []
     try {
         raw := FileRead(croquisUsedLog)
@@ -770,11 +840,27 @@ PickCroquisImage() {
             unused.Push(img)
     }
 
-    ; 全周済みならリセット
+    ; このモードのフォルダを全部使い切ったら、共有リストから
+    ; 「このモードの画像分だけ」を取り除いてリセットする
+    ; （他モードの使用履歴はそのまま残す＝他モードの画像が誤って再度使えるようになるのを防ぐ）
     if (unused.Length = 0) {
+        remaining := []
+        for u in usedList {
+            belongsToThisMode := false
+            for img in allImages {
+                if (StrLower(u) = StrLower(img)) {
+                    belongsToThisMode := true
+                    break
+                }
+            }
+            if (!belongsToThisMode)
+                remaining.Push(u)
+        }
         try FileDelete(croquisUsedLog)
+        for r in remaining
+            FileAppend(r "`n", croquisUsedLog)
         unused := allImages
-        TrayTip("🎨 クロッキー", "全画像を使い切ったためリセットしました", "Mute")
+        TrayTip("🎨 クロッキー", "モード" mode "の画像を全て使い切ったためリセットしました", "Mute")
     }
 
     ; ランダム選択
@@ -784,22 +870,37 @@ PickCroquisImage() {
     ; 使用済みに追記
     FileAppend(selected "`n", croquisUsedLog)
 
-    return croquisFolder "\" selected
+    return folder "\" selected
 }
 
 ; ===== クロッキー起動（変更不要）=====
 LaunchCroquis() {
-    global scriptPath, croquisFolder, croquisMode, croquisModeParams, delayMinutes, countdownEnd, countdownMode
+    global scriptPath, croquisMode, croquisModeParams, delayMinutes, countdownEnd, countdownMode
 
-    if (!DirExist(croquisFolder)) {
-        TrayTip("⚠️ クロッキースキップ", "画像フォルダが見つかりません：" croquisFolder, "Mute")
+    ; ランダムモード（croquisMode = 0）の場合、既存モードの中から毎回ランダムに1つ選ぶ
+    ; ※ croquisMode 自体（設定値）は書き換えない。今回の起動用に一時的に決めるだけ
+    targetMode := croquisMode
+    if (croquisMode = 0) {
+        availableModes := []
+        for k, v in croquisModeParams
+            availableModes.Push(k)
+        targetMode := availableModes[Random(1, availableModes.Length)]
+        TrayTip("🎲 ランダムモード", "今回はモード" targetMode "が選ばれました", "Mute")
+    }
+
+    ; モードパラメータ取得（未定義なら1にフォールバック）
+    params := croquisModeParams.Has(targetMode) ? croquisModeParams[targetMode] : croquisModeParams[1]
+    useMode := croquisModeParams.Has(targetMode) ? targetMode : 1
+
+    if (!DirExist(params.folder)) {
+        TrayTip("⚠️ クロッキースキップ", "モード" useMode "の画像フォルダが見つかりません：" params.folder, "Mute")
         LaunchMain()
         return
     }
 
-    imgPath := PickCroquisImage()
+    imgPath := PickCroquisImage(useMode)
     if (imgPath = "") {
-        TrayTip("⚠️ クロッキースキップ", "フォルダ内に画像が見つかりませんでした", "Mute")
+        TrayTip("⚠️ クロッキースキップ", "モード" useMode "のフォルダ内に画像が見つかりませんでした", "Mute")
         LaunchMain()
         return
     }
@@ -808,11 +909,10 @@ LaunchCroquis() {
     CopyImageToClipboard(imgPath)
     TrayTip("🎨 クロッキー開始", "モデル画像をクリップボードにコピーしました`nクリスタのサブビューに貼り付けてください", "Mute")
 
-    ; モードパラメータ取得（未定義なら1にフォールバック）
-    params := croquisModeParams.Has(croquisMode) ? croquisModeParams[croquisMode] : croquisModeParams[1]
-
-    ; lock_window.ahk を /croquis モードで起動（パラメータを引数で渡す）
-    Run('"' scriptPath '" /croquis:' params.lockSecs ':' params.sets ':' params.interSecs)
+    ; lock_window.ahk を /croquis モードで起動（パラメータとモード番号を引数で渡す）
+    ; モード番号を渡すのは、セット間の次画像選択（lock_window.ahk側）でも
+    ; 同じモード専用フォルダから選ぶ必要があるため
+    Run('"' scriptPath '" /croquis:' params.lockSecs ':' params.sets ':' params.interSecs ':' useMode)
 
     ; クロッキー終了を監視（2秒ごとにフェーズファイルを確認）
     SetTimer(WaitForCroquisEnd, 2000)
