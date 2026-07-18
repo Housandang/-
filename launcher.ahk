@@ -50,6 +50,10 @@ mealPauseEndM   := 30
 ;            1セット目のモデルを記憶を頼りに描く練習用）
 ;        0 … ランダムモード（起動のたびに1〜4のいずれかをランダムに選択）
 ;
+;    croquisRandomExcludeModes
+;      → ランダムモード（croquisMode = 0）のとき、選択肢から除外したいモード番号を
+;        配列で指定します。例: [4] ならモード4は絶対に選ばれません
+;
 ;    croquisModeParams の folder
 ;      → モードごとのモデル画像フォルダのパス。
 ;        モード1は croquis_models_1、モード2は croquis_models_2、
@@ -63,6 +67,7 @@ mealPauseEndM   := 30
 ;      → 変更不要
 ; ================================================================
 croquisMode := 0
+croquisRandomExcludeModes := [2]   ; 例: [4] と書けばモード4をランダム対象から除外
 croquisDelayMinutes := 5
 croquisUsedLog      := A_ScriptDir "\croquis_used.txt"   ; 全モード共通の使用済みリスト（1ファイルで一元管理）
 croquisShotDir      := A_ScriptDir "\croquis_shots"   ; lock_window.ahk と合わせること
@@ -875,15 +880,29 @@ PickCroquisImage(mode) {
 
 ; ===== クロッキー起動（変更不要）=====
 LaunchCroquis() {
-    global scriptPath, croquisMode, croquisModeParams, delayMinutes, countdownEnd, countdownMode
+    global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, delayMinutes, countdownEnd, countdownMode
 
     ; ランダムモード（croquisMode = 0）の場合、既存モードの中から毎回ランダムに1つ選ぶ
     ; ※ croquisMode 自体（設定値）は書き換えない。今回の起動用に一時的に決めるだけ
     targetMode := croquisMode
     if (croquisMode = 0) {
         availableModes := []
-        for k, v in croquisModeParams
-            availableModes.Push(k)
+        for k, v in croquisModeParams {
+            excluded := false
+            for ex in croquisRandomExcludeModes {
+                if (ex = k) {
+                    excluded := true
+                    break
+                }
+            }
+            if (!excluded)
+                availableModes.Push(k)
+        }
+        if (availableModes.Length = 0) {
+            ; 除外しすぎて選べるモードが無い場合は、除外を無視して全モードから選ぶ
+            for k, v in croquisModeParams
+                availableModes.Push(k)
+        }
         targetMode := availableModes[Random(1, availableModes.Length)]
         TrayTip("🎲 ランダムモード", "今回はモード" targetMode "が選ばれました", "Mute")
     }
