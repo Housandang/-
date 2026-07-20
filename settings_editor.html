@@ -266,6 +266,7 @@ const DEFS = {
     {cat: "運動・昼休み", var: "exerciseUnlockMinutes", type: "int", label: "運動モード時間（分）",         desc: "運動モードのロック解除時間"},
     {cat: "運動・昼休み", var: "lunchBreakMinutes",     type: "int", label: "昼休み時間（分）",             desc: "昼休みモードの時間"},
     {cat: "作業達成",     var: "totalWorkGoalMinutes",  type: "int", label: "作業達成目標時間（分）",       desc: "この時間作業すると達成。0で無効"},
+    {cat: "作業達成",     var: "workIdleToleranceSecs", type: "int", label: "無操作許容時間（秒）",         desc: "作業ウィンドウがアクティブでも、この秒数以上無操作なら計上しない"},
     {cat: "休憩延期",     var: "breakDeferGraceSecs",   type: "int", label: "休憩延期の猶予（秒）",         desc: "作業以外のウィンドウが続いたら休憩開始とみなす秒数"},
     {cat: "集中モード",   var: "focusModeAutoFromSet",  type: "int", label: "自動発動の開始セット",         desc: "何セット目以降で集中モードが自動発動するか"},
     {cat: "集中モード",   var: "focusModeAutoChance",   type: "int", label: "自動発動の確率（%）",          desc: "集中モードが自動発動する確率"},

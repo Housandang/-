@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force   ; 既存のインスタンスを確認なしで自動終了・上書き
 
 ; ================================================================
@@ -242,7 +242,7 @@ croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
 ;    intermissionAddSets
 ;      → 時間切れ時に追加するセット数
 ; ================================================================
-intermissionMinutes := 30
+intermissionMinutes := 15
 intermissionAddSets := 2
 
 ; ================================================================
@@ -468,7 +468,7 @@ focusModeAllowProcesses := [
 ;            0 なら自動発動しない（手動のみ）
 ; ================================================================
 focusModeAutoFromSet := 3
-focusModeAutoChance := 25
+focusModeAutoChance  := 30
 
 ; ================================================================
 ; ★ 作業達成時間の設定
@@ -482,9 +482,15 @@ focusModeAutoChance := 25
 ;    ロック中・中休み中のみ計測します（休憩・食事中は計測しません）。
 ;    クロッキー（別プロセスとして起動）とまたがっても計測が引き継がれるよう、
 ;    work_goal.txt に随時保存し、起動のたびに本日分を読み込みます。
+;
+;    workIdleToleranceSecs
+;      → 作業ウィンドウがアクティブなままでも、この秒数以上マウス・キーボードの
+;        操作が無ければ、その間は作業時間として計上しません
+;        （ウィンドウを開いたままスマホを触っている時間などを除外するため）
 ; ================================================================
-totalWorkGoalMinutes := 125   ; 2時間半
-workGoalLogPath      := A_ScriptDir "\work_goal.txt"
+totalWorkGoalMinutes  := 150   ; 2時間半
+workIdleToleranceSecs := 60    ; 1分
+workGoalLogPath       := A_ScriptDir "\work_goal.txt"
 
 ; ================================================================
 ; ★ 休憩延期の設定
@@ -564,7 +570,10 @@ global g := {
     gameExtendUsed:       false,  ; 本日の延長を使用済みか
     croquisSet:           1,      ; クロッキー現在セット番号
     croquisTotal:         1,      ; クロッキー総セット数
-    croquisInter:         0       ; クロッキーセット間休憩（秒）
+    croquisInter:         0,      ; クロッキーセット間休憩（秒）
+    idlePaused:           false,  ; 無操作による自動一時停止中かどうか（他の一時停止と区別するため）
+    idleSavedTitle:       "",     ; 一時停止前のタイトル（復元用）
+    idleSavedSub:         ""      ; 一時停止前のサブテキスト（復元用）
 }
 
 ; ===== 運動ボタン：本日使用済みか確認（変更不要）=====
@@ -813,6 +822,7 @@ OnLunchBreak(btn, *) {
 
     ; タイマーを一時停止して残り時間を保存
     g.isPaused          := true
+    g.idlePaused        := false   ; 無操作検知による一時停止ではないことを明示
     g.pausedRemainingMs := Max(0, g.endTick - A_TickCount)
     g.isExercise        := true   ; 復帰処理を運動モードと共用するため流用
     g.exerciseEndTick   := A_TickCount + (lunchBreakMinutes * 60 * 1000)
@@ -1094,7 +1104,7 @@ UpdateWorkGoalTip()   ; 起動直後にも初期値を表示しておく
 SetTimer(CheckActiveWork, 5000)
 
 CheckActiveWork() {
-    global g, totalWorkGoalMinutes, workGoalLogPath
+    global g, totalWorkGoalMinutes, workIdleToleranceSecs, workGoalLogPath
 
     ; ロックフェーズ・中休み中・一時停止していないときのみ計測
     ; （中休み中も計測対象に含めないと「中休み中に達成した場合も即座に表示」が機能しないため）
@@ -1106,9 +1116,15 @@ CheckActiveWork() {
         return
 
     ; 前回チェックからの経過時間を加算
-    now := A_TickCount
-    if (g.lastActiveCheck > 0)
-        g.activeWorkMs += (now - g.lastActiveCheck)
+    ; ただし、ウィンドウがアクティブなままでも一定時間以上マウス・キーボードの
+    ; 操作が無い場合（スマホをいじっている等）は、その間を作業時間に含めない
+    now    := A_TickCount
+    idleMs := A_TimeIdlePhysical
+    if (g.lastActiveCheck > 0) {
+        elapsed := now - g.lastActiveCheck
+        if (idleMs < workIdleToleranceSecs * 1000)
+            g.activeWorkMs += elapsed
+    }
     g.lastActiveCheck := now
 
     ; 達成チェック
@@ -1126,6 +1142,49 @@ CheckActiveWork() {
     FileAppend(FormatTime(, "yyyyMMdd") "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0"), workGoalLogPath)
 
     UpdateWorkGoalTip()
+}
+
+; ===== 無操作によるロックタイマーの自動一時停止：0.2秒ごとに監視（変更不要）=====
+; ロック中（クロッキー含む）にworkIdleToleranceSecs以上無操作なら、
+; 作業時間への未加算だけでなく、タイマー自体も一時停止する。
+; 操作再開時は次のチェックまで待たず、この0.2秒間隔のチェックで即座に検知して再開する。
+; 食事休憩・運動など他の理由で既に一時停止中の場合は一切関与しない
+; （g.idlePaused で「このチェックが一時停止させたのか」を区別している）。
+SetTimer(CheckIdleTimerPause, 200)
+
+CheckIdleTimerPause() {
+    global g, timerTitle, timerSub, workIdleToleranceSecs
+
+    ; ロック中のみが対象（休憩・中休みは対象外。中休みは無操作でも
+    ; タイマーが進み続けることが「自動でセット追加」の前提になっているため）
+    if (g.phase != "lock")
+        return
+
+    idleMs    := A_TimeIdlePhysical
+    isIdleNow := (idleMs >= workIdleToleranceSecs * 1000)
+
+    if (isIdleNow) {
+        if (!g.isPaused) {
+            ; まだ何にも一時停止されていない状態からのみ、無操作による一時停止を開始する
+            g.idlePaused        := true
+            g.isPaused          := true
+            g.pausedRemainingMs := Max(0, g.endTick - A_TickCount)
+            g.idleSavedTitle    := timerTitle.Value
+            g.idleSavedSub      := timerSub.Value
+            timerTitle.Value    := "⏸ 離席検知中"
+            timerSub.Value      := "操作を再開すると自動的に再開します"
+        }
+    } else {
+        if (g.idlePaused) {
+            ; 無操作による一時停止のみを解除する（他の理由による一時停止は触らない）
+            g.idlePaused      := false
+            g.isPaused        := false
+            g.lastActiveCheck := 0   ; 作業時間の誤加算防止（他の一時停止解除と同じパターン）
+            g.endTick         := A_TickCount + g.pausedRemainingMs
+            timerTitle.Value  := g.idleSavedTitle
+            timerSub.Value    := g.idleSavedSub
+        }
+    }
 }
 
 ; ===== ゲームプレイ時間監視：10秒ごとに（変更不要）=====
@@ -1269,6 +1328,7 @@ CheckMealPause() {
             return
 
         g.isPaused          := true
+        g.idlePaused        := false   ; 無操作検知による一時停止ではないことを明示
         g.pausedRemainingMs := Max(0, g.endTick - A_TickCount)
 
         WritePhase("lunch")   ; サボり検知を無効化
@@ -1297,6 +1357,7 @@ EndMealPauseResume() {
     global g, timerGui, timerTitle, timerCount, timerSub, mealEndBtn
 
     g.isPaused        := false
+    g.idlePaused      := false   ; 念のため無操作フラグも解除しておく
     g.lastActiveCheck := 0   ; 食事休憩中の経過時間が作業時間に加算されないようリセット
     g.endTick         := A_TickCount + g.pausedRemainingMs
 
@@ -1352,6 +1413,7 @@ OnExerciseStart(btn, *) {
     g.targetTitles := newList
 
     g.isPaused          := true
+    g.idlePaused        := false   ; 無操作検知による一時停止ではないことを明示
     g.pausedRemainingMs := Max(0, g.endTick - A_TickCount)
     g.isExercise        := true
     g.exerciseEndTick   := A_TickCount + (exerciseUnlockMinutes * 60 * 1000)
@@ -1407,6 +1469,7 @@ ResumeAfterExercise() {
         NextDnsUnblock()   ; 食事休憩中はスマホブロックを解除
     } else {
         g.isPaused        := false
+        g.idlePaused      := false   ; 念のため無操作フラグも解除しておく
         g.lastActiveCheck := 0   ; 一時停止中の経過時間が作業時間に加算されないようリセット
         g.endTick         := A_TickCount + g.pausedRemainingMs
 
@@ -1789,6 +1852,7 @@ StartNextCroquisSet() {
     g.lastActiveCheck := 0
     g.endTick         := A_TickCount + (lockSecs * 1000)
     g.isPaused        := false
+    g.idlePaused      := false
 
     WritePhase("lock")
     NextDnsBlock()
@@ -2030,6 +2094,7 @@ RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
         g.lastActiveCheck := 0   ; 作業時間計測をリセット
         g.endTick    := A_TickCount + (lockSecs * 1000)
         g.isPaused   := false
+        g.idlePaused := false
         ; WritePhase("lock") をインライン展開（ネスト関数からの呼び出し保険）
         _phasePath := A_ScriptDir "\current_phase.txt"
         try FileDelete(_phasePath)
