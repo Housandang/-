@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force   ; 既存のインスタンスを確認なしで自動終了・上書き
 
 ; ================================================================
@@ -242,7 +242,7 @@ croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
 ;    intermissionAddSets
 ;      → 時間切れ時に追加するセット数
 ; ================================================================
-intermissionMinutes := 15
+intermissionMinutes := 30
 intermissionAddSets := 2
 
 ; ================================================================
