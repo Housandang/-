@@ -43,12 +43,12 @@ mealPauseEndM   := 30
 ;    croquisMode
 ;      → 使用するモードを番号で指定してください
 ;
-;        1 … 25分 × 1枚（デフォルト）
+;        1 … 25分 × 1枚
 ;        2 … 15分 × 2枚（セット間に2分休憩）
 ;        3 …  5分 × 5枚（セット間に1分休憩）
 ;        4 … 15分 × 2枚相当（モード2と同じ時間割だが、2セット目は画像を選ばない。
 ;            1セット目のモデルを記憶を頼りに描く練習用）
-;        0 … ランダムモード（起動のたびに1〜4のいずれかをランダムに選択）
+;        0 … ランダムモード（起動のたびに1〜4のいずれかをランダムに選択）（デフォルト）
 ;
 ;    croquisRandomExcludeModes
 ;      → ランダムモード（croquisMode = 0）のとき、選択肢から除外したいモード番号を
@@ -367,6 +367,51 @@ OnManualWakeRoutine(*) {
     }
 
     TrayTip("🔁 スリープ解除ルーティン", delayMinutes "分待機 → クロッキー → 作業 を開始します", "Mute")
+    StartWakeRoutine()
+}
+
+; ===== 無操作時間ベースの起床検知（変更不要）=====
+; 画面がオフになるだけでPC自体はスリープしない設定の場合、そのまま寝落ちしても
+; PBT_APMRESUMEAUTOMATIC（実際のスリープ復帰）が一切発生せず、
+; ルーティンが永遠に始まらないことがある。これを補うため、
+; 「minSleepHours 以上無操作が続いた後、操作が再開された瞬間」を
+; 実際のスリープ復帰と同じ意味とみなし、同じルーティンを起動する。
+longIdleDetected := false
+SetTimer(CheckLongIdleWake, 60000)   ; 1分ごとに監視
+
+CheckLongIdleWake() {
+    global longIdleDetected, minSleepHours, wakeRoutineActive, skipWDays, phaseFile
+
+    idleMs      := A_TimeIdlePhysical
+    thresholdMs := minSleepHours * 60 * 60 * 1000
+
+    if (idleMs >= thresholdMs) {
+        ; まだ無操作が続いている＝本人はまだ戻ってきていないので何もしない
+        longIdleDetected := true
+        return
+    }
+
+    if (!longIdleDetected)
+        return   ; 直近に長時間無操作が無かった（通常の利用中）
+
+    ; ここに来るのは「長時間無操作の後、操作を検知した」瞬間
+    longIdleDetected := false
+
+    if (wakeRoutineActive)
+        return   ; 既にルーティン進行中（実際のスリープ復帰等）なら何もしない
+
+    ; lock_window.ahk が既に動作中なら何もしない
+    phaseNow := ""
+    try phaseNow := Trim(FileRead(phaseFile))
+    if (phaseNow != "")
+        return
+
+    ; スキップ曜日チェック（実際のスリープ復帰と同じ判定）
+    for wday in skipWDays {
+        if (A_WDay = wday)
+            return
+    }
+
     StartWakeRoutine()
 }
 

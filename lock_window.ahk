@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force   ; 既存のインスタンスを確認なしで自動終了・上書き
 
 ; ================================================================
@@ -242,7 +242,7 @@ croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
 ;    intermissionAddSets
 ;      → 時間切れ時に追加するセット数
 ; ================================================================
-intermissionMinutes := 30
+intermissionMinutes := 15
 intermissionAddSets := 2
 
 ; ================================================================
@@ -573,7 +573,8 @@ global g := {
     croquisInter:         0,      ; クロッキーセット間休憩（秒）
     idlePaused:           false,  ; 無操作による自動一時停止中かどうか（他の一時停止と区別するため）
     idleSavedTitle:       "",     ; 一時停止前のタイトル（復元用）
-    idleSavedSub:         ""      ; 一時停止前のサブテキスト（復元用）
+    idleSavedSub:         "",     ; 一時停止前のサブテキスト（復元用）
+    inCaptureWait:        false   ; クロッキー撮影待機中かどうか（無操作検知の一時停止から除外するため）
 }
 
 ; ===== 運動ボタン：本日使用済みか確認（変更不要）=====
@@ -1158,6 +1159,14 @@ CheckIdleTimerPause() {
     ; ロック中のみが対象（休憩・中休みは対象外。中休みは無操作でも
     ; タイマーが進み続けることが「自動でセット追加」の前提になっているため）
     if (g.phase != "lock")
+        return
+
+    ; クロッキーの撮影待機中も対象外にする。
+    ; 撮影待機のカウントダウン（CaptureCountdownTick）は g.isPaused を見ずに
+    ; 独自に時間を管理しているため、ここで一時停止フラグを立ててしまうと、
+    ; 撮影完了→次フェーズへ移行した後もフラグだけが残留し、
+    ; 次のフェーズのタイマーが永久に止まったままになる不具合があった。
+    if (g.inCaptureWait)
         return
 
     idleMs    := A_TimeIdlePhysical
@@ -1911,6 +1920,7 @@ StartNextCroquisSet() {
         if (remaining <= 0) {
             SetTimer(CroquisLockTick, 0)
             FocusModeRestore()
+            g.inCaptureWait := true   ; 撮影待機中は無操作検知の一時停止対象から除外する
 
             timerTitle.Value := "🎨 まもなく撮影"
             timerSub.Value   := "画面をズームアウトしてください"
@@ -1924,6 +1934,7 @@ StartNextCroquisSet() {
                 rem := captureEnd - A_TickCount
                 if (rem <= 0) {
                     SetTimer(CaptureCountdownTick, 0)
+                    g.inCaptureWait := false
                     CaptureCroquisResult()
                     NextDnsUnblock()
 
