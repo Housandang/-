@@ -483,12 +483,21 @@ focusModeAutoChance  := 30
 ;    クロッキー（別プロセスとして起動）とまたがっても計測が引き継がれるよう、
 ;    work_goal.txt に随時保存し、起動のたびに本日分を読み込みます。
 ;
+;    ノルマ達成後にさらに作業した場合、その超過分は翌日1日だけノルマから
+;    差し引かれます（例: 前日30分超過なら、翌日のノルマは150分→120分）。
+;    ただし workGoalMinMinutes を下回ることはありません。超過分が
+;    差し引ける範囲を超えても、翌々日以降には持ち越しません。
+;
+;    workGoalMinMinutes
+;      → 超過分を差し引いても、これより短くはならない下限（分）
+;
 ;    workIdleToleranceSecs
 ;      → 作業ウィンドウがアクティブなままでも、この秒数以上マウス・キーボードの
 ;        操作が無ければ、その間は作業時間として計上しません
 ;        （ウィンドウを開いたままスマホを触っている時間などを除外するため）
 ; ================================================================
 totalWorkGoalMinutes  := 150   ; 2時間半
+workGoalMinMinutes    := 90    ; 1時間30分（超過繰り越しによる下限）
 workIdleToleranceSecs := 60    ; 1分
 workGoalLogPath       := A_ScriptDir "\work_goal.txt"
 
@@ -525,18 +534,40 @@ workWindowProcesses := [
 ]
 breakDeferGraceSecs := 5
 
-; 本日の作業ノルマ進捗を読み込む（日付が変わっていたらリセット）
+; 本日の作業ノルマ進捗を読み込む（日付が変わっていたら前日の超過分を反映）
 ; クロッキー用プロセスと通常作業用プロセスは別々に起動されるため、
 ; メモリ上の値だけでは引き継がれない。ファイル経由で引き継ぐ。
 _workActiveMs     := 0
 _workGoalReached  := false
-try {
-    _workGoalData := StrSplit(FileRead(workGoalLogPath), "|")
-    if (_workGoalData[1] = FormatTime(, "yyyyMMdd")) {
-        _workActiveMs    := Integer(_workGoalData[2])
-        _workGoalReached := (_workGoalData[3] = "1")
+_effectiveGoalMin := totalWorkGoalMinutes
+if (totalWorkGoalMinutes != 0) {
+    try {
+        _workGoalData := StrSplit(FileRead(workGoalLogPath), "|")
+        _storedDate   := _workGoalData[1]
+
+        if (_storedDate = FormatTime(, "yyyyMMdd")) {
+            ; 同じ日の続き（クロッキー→通常作業など）：そのまま引き継ぐ
+            _workActiveMs     := Integer(_workGoalData[2])
+            _workGoalReached  := (_workGoalData[3] = "1")
+            _effectiveGoalMin := (_workGoalData.Length >= 4) ? Integer(_workGoalData[4]) : totalWorkGoalMinutes
+        } else if (_storedDate = FormatTime(DateAdd(A_Now, -1, "Days"), "yyyyMMdd")) {
+            ; 前日から日付が変わった：前日の超過分を計算し、本日の実効ノルマに反映する
+            ; （前日の記録が無い・前日より前の日付の場合は繰り越しなし＝通常のノルマのまま）
+            _prevActiveMin := Round(Integer(_workGoalData[2]) / 60000)
+            _prevGoalMin   := (_workGoalData.Length >= 4) ? Integer(_workGoalData[4]) : totalWorkGoalMinutes
+            _overMin       := Max(0, _prevActiveMin - _prevGoalMin)
+            _effectiveGoalMin := Max(workGoalMinMinutes, totalWorkGoalMinutes - _overMin)
+        }
     }
+
+    ; 本日分（実効ノルマ含む）を即座に保存しておく。
+    ; クロッキー→通常作業など、本日中に複数プロセスが立ち上がっても
+    ; 同じ実効ノルマを使い続けられるようにするため。
+    try FileDelete(workGoalLogPath)
+    FileAppend(FormatTime(, "yyyyMMdd") "|" _workActiveMs "|" (_workGoalReached ? "1" : "0") "|" _effectiveGoalMin, workGoalLogPath)
 }
+
+global effectiveWorkGoalMinutes := _effectiveGoalMin
 
 global g := {
     phase:             "",
@@ -574,7 +605,11 @@ global g := {
     idlePaused:           false,  ; 無操作による自動一時停止中かどうか（他の一時停止と区別するため）
     idleSavedTitle:       "",     ; 一時停止前のタイトル（復元用）
     idleSavedSub:         "",     ; 一時停止前のサブテキスト（復元用）
-    inCaptureWait:        false   ; クロッキー撮影待機中かどうか（無操作検知の一時停止から除外するため）
+    inCaptureWait:        false,  ; クロッキー撮影待機中かどうか（無操作検知の一時停止から除外するため）
+    goingOut:             false,  ; 外出モード（無期限の手動一時停止）中かどうか
+    goOutSavedTitle:      "",     ; 外出モード開始前のタイトル（復元用）
+    goOutSavedSub:        "",     ; 外出モード開始前のサブテキスト（復元用）
+    goOutSavedColor:      ""      ; 外出モード開始前の背景色（復元用）
 }
 
 ; ===== 運動ボタン：本日使用済みか確認（変更不要）=====
@@ -613,24 +648,28 @@ global timerSub   := timerGui.Add("Text", "w295 Center cWhite y+5", "")
 ;    ➕ … セットを1つ追加
 ;    🥗 … 昼休み（タイマー＆サボり検知を一時停止・1日1回）
 ;    🎯 … 集中モード（許可リスト以外のウィンドウをすべて最小化）
+;    🚪 … 外出モード（数時間単位の外出用に、タイマーを無期限に一時停止）
 ; ================================================================
 timerGui.SetFont("s11", "Segoe UI")
-global exerciseBtn := timerGui.Add("Button", "x5 w70 y+10", "🚴")
+global exerciseBtn := timerGui.Add("Button", "x5 w56 y+10", "🚴")
 exerciseBtn.OnEvent("Click", OnExerciseStart)
 if (exerciseUsedToday)
     exerciseBtn.Enabled := false
 
-global addSetBtn := timerGui.Add("Button", "x+3 w70 yp", "➕")
+global addSetBtn := timerGui.Add("Button", "x+3 w56 yp", "➕")
 addSetBtn.OnEvent("Click", OnAddSet)
 
-global lunchBtn := timerGui.Add("Button", "x+3 w70 yp", "🥗")
+global lunchBtn := timerGui.Add("Button", "x+3 w56 yp", "🥗")
 lunchBtn.OnEvent("Click", OnLunchBreak)
 if (lunchUsedToday)
     lunchBtn.Enabled := false
 
-global focusBtn := timerGui.Add("Button", "x+3 w70 yp", "🎯")
+global focusBtn := timerGui.Add("Button", "x+3 w56 yp", "🎯")
 focusBtn.OnEvent("Click", OnFocusMode)
 focusBtn.Enabled := false   ; タイマー未起動中は無効
+
+global goOutBtn := timerGui.Add("Button", "x+3 w56 yp", "🚪")
+goOutBtn.OnEvent("Click", OnGoOut)
 
 ; 作業完了ボタン（中休みモード中のみ表示・変更不要）
 ; タイトル行の右横に配置し、中休み中のみ出現します
@@ -689,6 +728,11 @@ UpdateTooltip() {
         ToolTip("✅ 今日の作業完了を宣言`nサボり監視を停止し、待機モードに移行します`n押さない場合は " intermissionMinutes " 分後にセットが追加されます")
     } else if (ctrlHwnd = mealEndBtn.Hwnd) {
         ToolTip("⏭ 食事休憩を今すぐ終了して`nタイマーを再開します")
+    } else if (ctrlHwnd = goOutBtn.Hwnd) {
+        if (g.goingOut)
+            ToolTip("▶ 外出モードを終了して`nタイマーを再開します")
+        else
+            ToolTip("🚪 外出モード`n数時間の外出などのために、現在の状態のまま`nタイマーを無期限に一時停止します")
     } else {
         ToolTip()
     }
@@ -900,6 +944,52 @@ UpdateFocusBtnState() {
     }
 }
 
+; ===== 外出モードボタン処理（変更不要）=====
+; 数時間単位の外出のために、現在のフェーズ（ロック・休憩・中休み・クロッキー問わず）を
+; 無期限に一時停止する。既存の g.isPaused の仕組みをそのまま利用し、
+; g.pausedRemainingMs に残り時間を保存しておくことで、再開時に
+; 経過した現実時間を巻き戻す形で正しく引き継ぐ（食事休憩・運動と同じ方式）。
+OnGoOut(btn, *) {
+    global g, goOutBtn, timerGui, timerTitle, timerSub
+
+    if (!g.goingOut) {
+        ; 食事休憩・運動モードと重ねると、それぞれの終了処理と競合するため
+        ; 開始不可にする（先に終了してから外出モードを使ってもらう）
+        if (g.isExercise || g.inMealPause) {
+            TrayTip("🚪 外出モード", "食事休憩・運動モード中は開始できません。終了してからお試しください", "Mute")
+            return
+        }
+
+        g.goingOut          := true
+        g.isPaused          := true
+        g.idlePaused        := false
+        g.pausedRemainingMs := Max(0, g.endTick - A_TickCount)
+        g.goOutSavedTitle   := timerTitle.Value
+        g.goOutSavedSub     := timerSub.Value
+        g.goOutSavedColor   := timerGui.BackColor
+
+        timerGui.BackColor := "37474F"
+        timerTitle.Value   := "🚪 外出モード"
+        timerSub.Value     := "戻ったらこのボタンを押して再開してください"
+        goOutBtn.Text      := "▶ 再開"
+        SoundPlay("*48")
+        TrayTip("🚪 外出モード", "タイマーを一時停止しました。戻ったら再開ボタンを押してください", "Mute")
+    } else {
+        g.goingOut        := false
+        g.isPaused        := false
+        g.idlePaused       := false
+        g.lastActiveCheck := 0   ; 作業時間の誤加算防止（他の一時停止解除と同じパターン）
+        g.endTick         := A_TickCount + g.pausedRemainingMs
+
+        timerGui.BackColor := g.goOutSavedColor
+        timerTitle.Value   := g.goOutSavedTitle
+        timerSub.Value     := g.goOutSavedSub
+        goOutBtn.Text      := "🚪"
+        SoundPlay("*48")
+        TrayTip("▶ 再開", "タイマーを再開しました", "Mute")
+    }
+}
+
 ; ================================================================
 ; ★ 集中モード開始猶予の設定
 ;    集中モードに入る際、この秒数だけ待ってからウィンドウを最小化します。
@@ -1083,7 +1173,7 @@ FocusModeRestore() {
 ; ===== 作業ノルマの残り時間をトレイアイコンのツールチップに表示（変更不要）=====
 ; ロック中・中休み中・休憩中を問わず、常に直近の状態を表示し続ける
 UpdateWorkGoalTip() {
-    global g, totalWorkGoalMinutes
+    global g, totalWorkGoalMinutes, effectiveWorkGoalMinutes
 
     if (totalWorkGoalMinutes = 0)
         return
@@ -1093,7 +1183,7 @@ UpdateWorkGoalTip() {
         return
     }
 
-    remainMin := Ceil(Max(0, totalWorkGoalMinutes * 60000 - g.activeWorkMs) / 60000)
+    remainMin := Ceil(Max(0, effectiveWorkGoalMinutes * 60000 - g.activeWorkMs) / 60000)
     h := remainMin // 60
     m := Mod(remainMin, 60)
     label := (h > 0) ? h "時間" m "分" : m "分"
@@ -1105,7 +1195,7 @@ UpdateWorkGoalTip()   ; 起動直後にも初期値を表示しておく
 SetTimer(CheckActiveWork, 5000)
 
 CheckActiveWork() {
-    global g, totalWorkGoalMinutes, workIdleToleranceSecs, workGoalLogPath
+    global g, totalWorkGoalMinutes, effectiveWorkGoalMinutes, workIdleToleranceSecs, workGoalLogPath
 
     ; ロックフェーズ・中休み中・一時停止していないときのみ計測
     ; （中休み中も計測対象に含めないと「中休み中に達成した場合も即座に表示」が機能しないため）
@@ -1128,19 +1218,20 @@ CheckActiveWork() {
     }
     g.lastActiveCheck := now
 
-    ; 達成チェック
-    if (!g.workGoalReached && g.activeWorkMs >= totalWorkGoalMinutes * 60000) {
+    ; 達成チェック（前日の超過分により短縮されている場合は effectiveWorkGoalMinutes で判定）
+    if (!g.workGoalReached && g.activeWorkMs >= effectiveWorkGoalMinutes * 60000) {
         g.workGoalReached := true
         SoundPlay("*48")
-        TrayTip("🎉 作業達成！", totalWorkGoalMinutes " 分の作業時間を達成しました。`n休憩中のスクリプト停止が許可されます。", "Mute")
+        TrayTip("🎉 作業達成！", effectiveWorkGoalMinutes " 分の作業時間を達成しました。`n休憩中のスクリプト停止が許可されます。", "Mute")
         ; 中休み中に達成した場合は即座にボタンを表示
         if (g.phase = "intermission")
             workDoneBtn.Visible := true
     }
 
-    ; ファイルに保存（クロッキー→通常作業など、プロセスをまたいで引き継ぐため）
+    ; ファイルに保存（クロッキー→通常作業など、プロセスをまたいで引き継ぐため。
+    ; 4項目目に本日の実効ノルマも保存し、翌日の繰り越し計算に使う）
     try FileDelete(workGoalLogPath)
-    FileAppend(FormatTime(, "yyyyMMdd") "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0"), workGoalLogPath)
+    FileAppend(FormatTime(, "yyyyMMdd") "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0") "|" effectiveWorkGoalMinutes, workGoalLogPath)
 
     UpdateWorkGoalTip()
 }
