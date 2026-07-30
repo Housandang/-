@@ -28,6 +28,34 @@ scriptPath   := A_ScriptDir "\lock_window.ahk"
 sleepLogPath := A_ScriptDir "\last_sleep.txt"
 
 ; ================================================================
+; ★ 睡眠ベースの「1日の区切り」（day_state.txt）
+;
+;    作業ノルマ・残業時間の判定は、カレンダー上の日付（0時）ではなく
+;    ここで管理する「dayId」という通し番号を基準にする。
+;    dayId は StartWakeRoutine()（＝スリープ復帰・長時間無操作からの復帰・
+;    手動でのスリープ解除ルーティン実行のいずれか）が呼ばれるたびに
+;    1つ進む。つまり「しっかり寝て起きるまでは同じ1日」という扱いになり、
+;    深夜0時をまたいで作業を続けても、その日の続きとして正しく計測される。
+;
+;    dayId は day_state.txt（このファイルと同じフォルダ）に保存し、
+;    lock_window.ahk 側からも読み取れるようにする。書き込むのは
+;    launcher.ahk のみ（lock_window.ahk は起動時に読み取るだけ）。
+;
+;    work_goal.txt（作業ノルマ）・overtime_work.txt（残業時間）は
+;    どちらもこの dayId を日付の代わりに使う。それ以外の「1日1回」系
+;    （運動・昼休みボタン、ゲームプレイ時間制限など）は今回の変更対象外で、
+;    従来通りカレンダー日付のままなので注意。
+; ================================================================
+dayStatePath := A_ScriptDir "\day_state.txt"
+
+global currentDayId := 1
+if FileExist(dayStatePath) {
+    try currentDayId := Integer(Trim(FileRead(dayStatePath)))
+} else {
+    try FileAppend(currentDayId, dayStatePath)
+}
+
+; ================================================================
 ; ★ 食事休憩の時間設定（lock_window.ahk と合わせてください）
 ;    この時間帯にカウントダウンが終了した場合、クロッキーは
 ;    食事休憩終了後まで自動的に待機します。
@@ -36,6 +64,46 @@ mealPauseStartH := 19
 mealPauseStartM := 0
 mealPauseEndH   := 20
 mealPauseEndM   := 30
+
+; ================================================================
+; ★ 残業時間の計測（ロック外での作業ノルマ超過分）
+;
+;    lock_window.ahk はノルマ達成後、休憩中にスクリプトを終了して
+;    1日を終える運用を想定しているため、終了後にロック外で行った
+;    追加の作業時間はそちらでは計測できません。
+;    そのぶんをこの launcher.ahk が常駐監視で独自に計測し、
+;    翌日のノルマ軽減（lock_window.ahk 側の繰り越し計算）に
+;    加算されるようにします。
+;
+;    overtimeWorkWindowTitles / overtimeWorkWindowProcesses
+;      → lock_window.ahk の workWindowTitles / workWindowProcesses と
+;        必ず同じ内容にしてください（判定基準がずれると正しく計測できません）
+;
+;    overtimeIdleToleranceSecs
+;      → lock_window.ahk の workIdleToleranceSecs と合わせてください
+;
+;    計測条件（すべて満たす間だけ加算）:
+;      ・本日すでにノルマを達成している（work_goal.txt を参照）
+;      ・現在 lock_window.ahk が lock / 中休み フェーズ中ではない
+;        （その間は lock_window.ahk 側で計測済みのため、二重計上防止）
+;      ・対象ウィンドウがアクティブ、かつ無操作許容時間内
+; ================================================================
+overtimeWorkWindowTitles := [
+    ; ↓ lock_window.ahk の workWindowTitles と合わせて編集
+    ; "Visual Studio Code",
+    ; "sakura",
+]
+overtimeWorkWindowProcesses := [
+    "CLIPStudioPaint.exe",
+    ; ↓ lock_window.ahk の workWindowProcesses と合わせて編集
+    ; "sai2.exe",
+    ; "Photoshop.exe",
+]
+overtimeIdleToleranceSecs := 60   ; 1分
+
+; ===== 残業ログ・作業ノルマログのパス（lock_window.ahk と共有・変更不要）=====
+overtimeLogPath := A_ScriptDir "\overtime_work.txt"
+workGoalLogPath := A_ScriptDir "\work_goal.txt"
 
 ; ================================================================
 ; ★ クロッキー設定
@@ -327,6 +395,15 @@ OnPower(wParam, lParam, msg, hwnd) {
 ; ===== 待機→クロッキー→作業のルーティンを開始（自動起床・手動実行の共通処理）=====
 StartWakeRoutine() {
     global countdownEnd, countdownMode, showAttempts, delayMinutes, wakeRoutineActive, nightBlockFlagPath
+    global currentDayId, dayStatePath
+
+    ; 睡眠明け＝新しい1日の開始とみなし、日付境界（dayId）を1つ進める。
+    ; 作業ノルマ・残業時間の判定はカレンダー日付ではなくこの値を基準にする。
+    currentDayId += 1
+    try {
+        FileDelete(dayStatePath)
+        FileAppend(currentDayId, dayStatePath)
+    }
 
     ; 就寝ブロックが実行されていれば起床時に解除
     if FileExist(nightBlockFlagPath) {
@@ -1190,6 +1267,115 @@ CheckAbsence() {
     ; 操作が再開されたら警告フラグをリセット
     if (idleMs < warnMs)
         sabo.warnedThisIdle := false
+}
+
+; ================================================================
+; ★ 残業時間の計測（変更不要）
+;
+;    5秒ごとに以下を確認し、すべて満たす間だけ経過時間を加算する。
+;      ・本日の work_goal.txt が「本日の dayId」かつ goalReached=1
+;      ・current_phase.txt が lock / intermission ではない
+;        （lock_window.ahk 側で計測中の時間と二重計上しないため）
+;      ・対象ウィンドウがアクティブ、かつ無操作許容時間内
+;
+;    結果は overtime_work.txt に "dayId|残業ms" 形式で保存する
+;    （dayId は上記の day_state.txt の値。カレンダー日付ではなく
+;      「睡眠明けから次の睡眠明けまで」を1日とする区切り）。
+;    dayId が変わったらメモリ上のカウンタは即座に0にリセットするが、
+;    ファイルへの書き込みは「本日分の残業が実際に発生したとき」まで
+;    遅延させる（日をまたいで作業を続けていた場合に、まだ lock_window.ahk
+;    に読まれていない前日分をファイルごと消してしまわないため）。
+;
+;    このファイルは lock_window.ahk 起動時の翌日繰り越し計算でのみ
+;    読み込まれる（launcher.ahk 側では読み込み後のリセット等は行わない）。
+; ================================================================
+global overtimeDayId     := currentDayId
+global overtimeMs        := 0
+global overtimeLastCheck := 0
+try {
+    _otInit := StrSplit(FileRead(overtimeLogPath), "|")
+    if (Integer(_otInit[1]) = currentDayId)
+        overtimeMs := Integer(_otInit[2])
+}
+
+SetTimer(CheckOvertimeWork, 5000)
+
+; ロック外での作業ウィンドウ判定（lock_window.ahk の IsWorkWindow() と同じロジック）
+IsOvertimeWorkWindow() {
+    global overtimeWorkWindowTitles, overtimeWorkWindowProcesses
+    try {
+        activeHwnd := WinGetID("A")
+        if (!activeHwnd)
+            return false
+        title := WinGetTitle("ahk_id " activeHwnd)
+        proc  := WinGetProcessName("ahk_id " activeHwnd)
+        for kw in overtimeWorkWindowTitles {
+            if InStr(title, kw)
+                return true
+        }
+        for p in overtimeWorkWindowProcesses {
+            if (StrLower(proc) = StrLower(p))
+                return true
+        }
+    }
+    return false
+}
+
+CheckOvertimeWork() {
+    global overtimeMs, overtimeDayId, overtimeLastCheck, overtimeLogPath, currentDayId
+    global overtimeIdleToleranceSecs, phaseFile, workGoalLogPath
+
+    ; dayId（睡眠ベースの日付境界）が変わったら「メモリ上のカウンタ」だけリセットする（ファイルは触らない）。
+    ; ここで overtime_work.txt を即座に上書きすると、日をまたいで作業を続けていた場合に
+    ; まだ lock_window.ahk に読まれていない前日分の残業時間が消えてしまう。
+    ; 本日分は goalReachedToday が true になって実際に加算が発生したときに、
+    ; 下の書き込み処理で初めてファイルが「今日のdayId」で上書きされる。
+    ; （本日分の書き込みが起きる＝本日すでに lock_window.ahk が起動してノルマを
+    ;   達成済みということなので、その起動時点で前日分は既に読み取り済みのはずであり、
+    ;   上書きしても前日分を消してしまう心配はない）
+    if (currentDayId != overtimeDayId) {
+        overtimeDayId     := currentDayId
+        overtimeMs        := 0
+        overtimeLastCheck := 0
+    }
+
+    ; 本日すでにノルマを達成しているか確認（work_goal.txt は lock_window.ahk が書き込む）
+    goalReachedToday := false
+    try {
+        _wg := StrSplit(FileRead(workGoalLogPath), "|")
+        if (Integer(_wg[1]) = currentDayId && _wg.Length >= 3)
+            goalReachedToday := (_wg[3] = "1")
+    }
+    if (!goalReachedToday) {
+        overtimeLastCheck := 0   ; 未達成の間は経過時間を積み上げない
+        return
+    }
+
+    ; lock_window.ahk が現在 lock / 中休み中なら、そちらで計測済みのため対象外
+    ; （current_phase.txt が読めない＝lock_window.ahk が動いていない場合は "" 扱いになり対象になる）
+    phaseNow := ""
+    try phaseNow := Trim(FileRead(phaseFile))
+    if (phaseNow = "lock" || phaseNow = "intermission") {
+        overtimeLastCheck := 0
+        return
+    }
+
+    if (!IsOvertimeWorkWindow()) {
+        overtimeLastCheck := 0
+        return
+    }
+
+    now    := A_TickCount
+    idleMs := A_TimeIdlePhysical
+    if (overtimeLastCheck > 0) {
+        elapsed := now - overtimeLastCheck
+        if (idleMs < overtimeIdleToleranceSecs * 1000)
+            overtimeMs += elapsed
+    }
+    overtimeLastCheck := now
+
+    try FileDelete(overtimeLogPath)
+    FileAppend(currentDayId "|" overtimeMs, overtimeLogPath)
 }
 
 ; ===== スリープ解除時：前日ログをGUIで表示（変更不要）=====

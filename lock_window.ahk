@@ -495,11 +495,28 @@ focusModeAutoChance  := 30
 ;      → 作業ウィンドウがアクティブなままでも、この秒数以上マウス・キーボードの
 ;        操作が無ければ、その間は作業時間として計上しません
 ;        （ウィンドウを開いたままスマホを触っている時間などを除外するため）
+;
+;    ★残業時間について
+;    ノルマ達成後、休憩中にこのスクリプトを終了して1日を終える運用のため、
+;    終了後にロック外で行った作業は本来ここでは計測できません。
+;    そのぶんは launcher.ahk 側が常駐監視で独自に計測し、
+;    overtime_work.txt に保存します。このファイルは翌日の繰り越し計算
+;    （下の起動時ブロック）で読み込むだけで、lock_window.ahk 側からは
+;    書き込みません（launcher.ahk が起動中に同じファイルへ書き込むと
+;    競合するため、書き込み元を1つに限定しています）。
 ; ================================================================
 totalWorkGoalMinutes  := 150   ; 2時間半
 workGoalMinMinutes    := 90    ; 1時間30分（超過繰り越しによる下限）
 workIdleToleranceSecs := 60    ; 1分
 workGoalLogPath       := A_ScriptDir "\work_goal.txt"
+overtimeLogPath       := A_ScriptDir "\overtime_work.txt"   ; launcher.ahk が書き込む残業ログ（読み取り専用で参照）
+
+; 「1日の区切り」は launcher.ahk が睡眠復帰のたびに進める dayId を基準にする
+; （カレンダー日付の0時ではない。詳細は launcher.ahk 側の day_state.txt の説明を参照）。
+; このファイルは launcher.ahk のみが書き込み、lock_window.ahk 側は起動時に読み取るだけ。
+dayStatePath := A_ScriptDir "\day_state.txt"
+currentDayId := 1
+try currentDayId := Integer(Trim(FileRead(dayStatePath)))
 
 ; ================================================================
 ; ★ 休憩延期の設定
@@ -534,7 +551,7 @@ workWindowProcesses := [
 ]
 breakDeferGraceSecs := 5
 
-; 本日の作業ノルマ進捗を読み込む（日付が変わっていたら前日の超過分を反映）
+; 本日の作業ノルマ進捗を読み込む（dayIdが変わっていたら前日の超過分を反映）
 ; クロッキー用プロセスと通常作業用プロセスは別々に起動されるため、
 ; メモリ上の値だけでは引き継がれない。ファイル経由で引き継ぐ。
 _workActiveMs     := 0
@@ -543,28 +560,40 @@ _effectiveGoalMin := totalWorkGoalMinutes
 if (totalWorkGoalMinutes != 0) {
     try {
         _workGoalData := StrSplit(FileRead(workGoalLogPath), "|")
-        _storedDate   := _workGoalData[1]
+        _storedDayId  := Integer(_workGoalData[1])
 
-        if (_storedDate = FormatTime(, "yyyyMMdd")) {
-            ; 同じ日の続き（クロッキー→通常作業など）：そのまま引き継ぐ
+        if (_storedDayId = currentDayId) {
+            ; 同じ日（同じ睡眠区間）の続き（クロッキー→通常作業など）：そのまま引き継ぐ
             _workActiveMs     := Integer(_workGoalData[2])
             _workGoalReached  := (_workGoalData[3] = "1")
             _effectiveGoalMin := (_workGoalData.Length >= 4) ? Integer(_workGoalData[4]) : totalWorkGoalMinutes
-        } else if (_storedDate = FormatTime(DateAdd(A_Now, -1, "Days"), "yyyyMMdd")) {
-            ; 前日から日付が変わった：前日の超過分を計算し、本日の実効ノルマに反映する
-            ; （前日の記録が無い・前日より前の日付の場合は繰り越しなし＝通常のノルマのまま）
+        } else if (_storedDayId = currentDayId - 1) {
+            ; 前日（1つ前の睡眠区間）から日が変わった：前日の超過分を計算し、本日の実効ノルマに反映する
+            ; （前日の記録が無い・2日以上前の場合は繰り越しなし＝通常のノルマのまま）
             _prevActiveMin := Round(Integer(_workGoalData[2]) / 60000)
             _prevGoalMin   := (_workGoalData.Length >= 4) ? Integer(_workGoalData[4]) : totalWorkGoalMinutes
             _overMin       := Max(0, _prevActiveMin - _prevGoalMin)
+
+            ; launcher.ahk が計測した「前日・ロック外での残業時間」も繰り越しに加算する
+            ; （ノルマ達成後にこのスクリプトを終了して、ロック外で追加作業した分）
+            _prevOvertimeMin := 0
+            try {
+                _otData := StrSplit(FileRead(overtimeLogPath), "|")
+                if (Integer(_otData[1]) = currentDayId - 1)
+                    _prevOvertimeMin := Round(Integer(_otData[2]) / 60000)
+            }
+            _overMin += _prevOvertimeMin
+
             _effectiveGoalMin := Max(workGoalMinMinutes, totalWorkGoalMinutes - _overMin)
         }
+        ; それ以外（2日以上前 or 記録なし）は繰り越しなし＝通常のノルマのまま
     }
 
     ; 本日分（実効ノルマ含む）を即座に保存しておく。
     ; クロッキー→通常作業など、本日中に複数プロセスが立ち上がっても
     ; 同じ実効ノルマを使い続けられるようにするため。
     try FileDelete(workGoalLogPath)
-    FileAppend(FormatTime(, "yyyyMMdd") "|" _workActiveMs "|" (_workGoalReached ? "1" : "0") "|" _effectiveGoalMin, workGoalLogPath)
+    FileAppend(currentDayId "|" _workActiveMs "|" (_workGoalReached ? "1" : "0") "|" _effectiveGoalMin, workGoalLogPath)
 }
 
 global effectiveWorkGoalMinutes := _effectiveGoalMin
@@ -592,6 +621,7 @@ global g := {
     lastActiveCheck:      0,      ; 前回の作業時間チェックのTickCount
     focusMode:            false,  ; 集中モード中かどうか
     focusModeIsAuto:      false,  ; true=自動発動 / false=手動発動
+    lastSetHadFocusMode:  false,  ; 直前に完了したセットが集中モードだったか（自動抽選の連続発動防止用）
     intermissionEnd:      0,      ; 中休みモード終了のTickCount
     focusCountdownEnd:    0,      ; 集中モード猶予カウントダウン用
     focusCountingDown:    false,  ; カウントダウン中はブロックを一時停止
@@ -1195,7 +1225,7 @@ UpdateWorkGoalTip()   ; 起動直後にも初期値を表示しておく
 SetTimer(CheckActiveWork, 5000)
 
 CheckActiveWork() {
-    global g, totalWorkGoalMinutes, effectiveWorkGoalMinutes, workIdleToleranceSecs, workGoalLogPath
+    global g, totalWorkGoalMinutes, effectiveWorkGoalMinutes, workIdleToleranceSecs, workGoalLogPath, currentDayId
 
     ; ロックフェーズ・中休み中・一時停止していないときのみ計測
     ; （中休み中も計測対象に含めないと「中休み中に達成した場合も即座に表示」が機能しないため）
@@ -1229,9 +1259,11 @@ CheckActiveWork() {
     }
 
     ; ファイルに保存（クロッキー→通常作業など、プロセスをまたいで引き継ぐため。
-    ; 4項目目に本日の実効ノルマも保存し、翌日の繰り越し計算に使う）
+    ; 4項目目に本日の実効ノルマも保存し、翌日の繰り越し計算に使う。
+    ; dayId は起動時に読み取った固定値をそのまま使う（睡眠を挟まない限り同じ日として扱うため、
+    ; ここで日付を再計算する必要はない）
     try FileDelete(workGoalLogPath)
-    FileAppend(FormatTime(, "yyyyMMdd") "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0") "|" effectiveWorkGoalMinutes, workGoalLogPath)
+    FileAppend(currentDayId "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0") "|" effectiveWorkGoalMinutes, workGoalLogPath)
 
     UpdateWorkGoalTip()
 }
@@ -2206,11 +2238,15 @@ RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
         ; 自動集中モード判定
         ; ・前セットが自動発動だった場合 → いったんリセットして再抽選
         ; ・前セットが手動発動だった場合 → リセットせず引き継ぎ（抽選もスキップ）
+        ; ・自動抽選は「現在OFFであること」に加えて「直前セットが集中モードでなかったこと」も条件にする
+        ;   （集中モードだったセットの直後のセットで連続して自動発動しないようにするため。
+        ;    休憩中にボタンでON/OFFを切り替えたかどうかに関わらず、直前セットのロック中の
+        ;    実際の状態＝g.lastSetHadFocusMode で判定する）
         if (g.focusModeIsAuto) {
             g.focusMode     := false
             g.focusModeIsAuto := false
         }
-        if (!g.focusMode && currentSet >= focusModeAutoFromSet) {
+        if (!g.focusMode && !g.lastSetHadFocusMode && currentSet >= focusModeAutoFromSet) {
             if (Random(1, 100) <= focusModeAutoChance) {
                 g.focusMode       := true
                 g.focusModeIsAuto := true
@@ -2315,6 +2351,12 @@ RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
             g.endTick      := A_TickCount + (breakSecs * 1000)
             WritePhase("break")
             NextDnsUnblock()
+
+            ; このセットのロック中に集中モードだったかを記録しておく
+            ; （次セットの自動抽選条件「直前セットが集中モードでなかったこと」に使う。
+            ;   休憩中にボタンで on/off を切り替えても、ここで記録した値は変わらない）
+            g.lastSetHadFocusMode := g.focusMode
+
 
             ; 最小化されていた場合は復元してから休憩表示へ
             timerGui.Show("NoActivate")
