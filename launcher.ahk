@@ -101,6 +101,11 @@ overtimeWorkWindowProcesses := [
 ]
 overtimeIdleToleranceSecs := 60   ; 1分
 
+; 翌日のノルマ予測表示（トレイツールチップ）にも使うため、
+; lock_window.ahk の同名設定と必ず同じ値にしてください
+totalWorkGoalMinutes := 150   ; 2時間半
+workGoalMinMinutes   := 90    ; 1時間30分（超過繰り越しによる下限）
+
 ; ===== 残業ログ・作業ノルマログのパス（lock_window.ahk と共有・変更不要）=====
 overtimeLogPath := A_ScriptDir "\overtime_work.txt"
 workGoalLogPath := A_ScriptDir "\work_goal.txt"
@@ -1376,6 +1381,76 @@ CheckOvertimeWork() {
 
     try FileDelete(overtimeLogPath)
     FileAppend(currentDayId "|" overtimeMs, overtimeLogPath)
+}
+
+; ================================================================
+; ★ 待機中のトレイツールチップに「翌日のノルマ予測」を表示（変更不要）
+;
+;    本日すでにノルマを達成している場合、現時点までの残業時間をもとに
+;    「今この瞬間に1日を終えたら、翌日のノルマは何時間何分になるか」を
+;    15秒ごとに計算してツールチップに表示する。
+;
+;    計算式は lock_window.ahk 起動時の繰り越し計算と全く同じ:
+;      超過分 = max(0, 本日の作業時間 - 本日の実効ノルマ) + 本日の残業時間
+;      翌日のノルマ = max(workGoalMinMinutes, totalWorkGoalMinutes - 超過分)
+;
+;    カウントダウン中（作業開始まで／クロッキー開始まで）・就寝モード中は
+;    そちらの表示を優先し、この更新は行わない。
+;    ノルマ未達成、または本日分のデータがまだ無い場合は通常の
+;    「Work Launcher - 待機中」のまま。
+; ================================================================
+SetTimer(UpdateIdleIconTip, 15000)
+
+FormatMinutesHM(mins) {
+    mins := Max(0, Round(mins))
+    h := mins // 60
+    m := Mod(mins, 60)
+    if (h > 0)
+        return h "時間" m "分"
+    return m "分"
+}
+
+UpdateIdleIconTip() {
+    global countdownEnd, nightModeActive, workGoalLogPath, overtimeLogPath, currentDayId
+    global totalWorkGoalMinutes, workGoalMinMinutes
+
+    ; カウントダウン中・就寝モード中はそちらの表示を優先し、何もしない
+    if (nightModeActive)
+        return
+    if (countdownEnd > 0 && countdownEnd > A_TickCount)
+        return
+
+    goalReachedToday := false
+    todayActiveMin    := 0
+    todayEffGoalMin   := totalWorkGoalMinutes
+    try {
+        _wg := StrSplit(FileRead(workGoalLogPath), "|")
+        if (Integer(_wg[1]) = currentDayId && _wg.Length >= 3) {
+            goalReachedToday := (_wg[3] = "1")
+            todayActiveMin   := Round(Integer(_wg[2]) / 60000)
+            todayEffGoalMin  := (_wg.Length >= 4) ? Integer(_wg[4]) : totalWorkGoalMinutes
+        }
+    }
+
+    if (!goalReachedToday) {
+        A_IconTip := "Work Launcher - 待機中"
+        return
+    }
+
+    todayOvertimeMin := 0
+    try {
+        _ot := StrSplit(FileRead(overtimeLogPath), "|")
+        if (Integer(_ot[1]) = currentDayId)
+            todayOvertimeMin := Round(Integer(_ot[2]) / 60000)
+    }
+
+    overMin       := Max(0, todayActiveMin - todayEffGoalMin) + todayOvertimeMin
+    projectedGoal := Max(workGoalMinMinutes, totalWorkGoalMinutes - overMin)
+
+    ; 「残業」として表示するのは、ロック中の超過分＋ロック外の残業分を合わせた合計
+    ; （＝翌日のノルマ計算にそのまま使っている overMin と同じ値。内訳ではなく合計を見せる）
+    A_IconTip := "Work Launcher - 待機中｜🎯ノルマ達成済み（残業"
+        . FormatMinutesHM(overMin) "）｜今終えると翌日のノルマ: " FormatMinutesHM(projectedGoal)
 }
 
 ; ===== スリープ解除時：前日ログをGUIで表示（変更不要）=====
