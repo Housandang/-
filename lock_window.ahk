@@ -2057,7 +2057,18 @@ StartNextCroquisSet() {
                 rem := captureEnd - A_TickCount
                 if (rem <= 0) {
                     SetTimer(CaptureCountdownTick, 0)
-                    g.inCaptureWait := false
+
+                    ; g.inCaptureWait はここではまだ false にしない。
+                    ; CaptureCroquisResult() 内の Sleep(800) と、スクリーンショット
+                    ; 保存を待つ RunWait で実質1〜数秒かかるが、その間 g.phase は
+                    ; まだ "break" に変わっていない（StartCroquisInterSet/
+                    ; StartCroquisBreak が呼ばれて初めて変わる）。この隙間で
+                    ; g.inCaptureWait を先に false にしてしまうと、無操作時間が
+                    ; すでに閾値を超えていた場合（クロッキーは紙・タブレットに
+                    ; 描くことが多く、PC自体の操作は長時間ゼロになりがち）、
+                    ; CheckIdleTimerPause がこの隙間で g.isPaused を立ててしまい、
+                    ; フェーズが break に変わった後は誰にも解除されず
+                    ; セット間カウントダウンが永久に固まる不具合があった。
                     CaptureCroquisResult()
                     NextDnsUnblock()
 
@@ -2066,6 +2077,10 @@ StartNextCroquisSet() {
                     } else {
                         StartCroquisBreak()
                     }
+
+                    ; フェーズが break に切り替わった後なら、CheckIdleTimerPause は
+                    ; phase != "lock" で対象外になるため、ここで false に戻しても安全。
+                    g.inCaptureWait := false
                     return
                 }
                 s := Ceil(rem / 1000)
