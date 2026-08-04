@@ -28,6 +28,53 @@ scriptPath   := A_ScriptDir "\lock_window.ahk"
 sleepLogPath := A_ScriptDir "\last_sleep.txt"
 
 ; ================================================================
+; ★ 複数プロセスからの同時アクセス対策（変更不要）
+;
+;    current_phase.txt・work_goal.txt・overtime_work.txt・day_state.txt は
+;    lock_window.ahk と launcher.ahk の両方から読み書きされる共有ファイル。
+;    お互い独立したプロセスなので、書き込み中のファイルを別プロセスが
+;    ちょうど同時に読もうとする（あるいはその逆）と、Windowsのファイル共有
+;    違反（エラー32「別のプロセスが使用中です」）が発生することがある。
+;    通常は一瞬で解消される一時的な競合なので、短い待機を挟んで
+;    数回リトライすることで対処する（lock_window.ahk側にも同じ実装がある）。
+; ================================================================
+SafeReadFile(path, retries := 5, delayMs := 30) {
+    loop retries {
+        try
+            return FileRead(path)
+        catch {
+            Sleep(delayMs)
+        }
+    }
+    return ""
+}
+
+SafeDeleteFile(path, retries := 5, delayMs := 30) {
+    loop retries {
+        try {
+            FileDelete(path)
+            return true
+        } catch {
+            Sleep(delayMs)
+        }
+    }
+    return false
+}
+
+SafeWriteFile(path, content, retries := 5, delayMs := 30) {
+    loop retries {
+        SafeDeleteFile(path, 1, 0)   ; 無ければ無いで良いので1回だけ試して失敗は無視
+        try {
+            FileAppend(content, path)
+            return true
+        } catch {
+            Sleep(delayMs)
+        }
+    }
+    return false
+}
+
+; ================================================================
 ; ★ 睡眠ベースの「1日の区切り」（day_state.txt）
 ;
 ;    作業ノルマ・残業時間の判定は、カレンダー上の日付（0時）ではなく
@@ -50,9 +97,11 @@ dayStatePath := A_ScriptDir "\day_state.txt"
 
 global currentDayId := 1
 if FileExist(dayStatePath) {
-    try currentDayId := Integer(Trim(FileRead(dayStatePath)))
+    _dayStateRaw := Trim(SafeReadFile(dayStatePath))
+    if (_dayStateRaw != "")
+        try currentDayId := Integer(_dayStateRaw)
 } else {
-    try FileAppend(currentDayId, dayStatePath)
+    SafeWriteFile(dayStatePath, currentDayId)
 }
 
 ; ================================================================
@@ -121,7 +170,8 @@ workGoalLogPath := A_ScriptDir "\work_goal.txt"
 ;        3 …  5分 × 5枚（セット間に1分休憩）
 ;        4 … 15分 × 2枚相当（モード2と同じ時間割だが、2セット目は画像を選ばない。
 ;            1セット目のモデルを記憶を頼りに描く練習用）
-;        0 … ランダムモード（起動のたびに1〜4のいずれかをランダムに選択）（デフォルト）
+;        5 … 25分 × 1枚相当だが画像を使わない教本模写用（開始前に5分の準備時間）
+;        0 … ランダムモード（起動のたびに1〜5のいずれかをランダムに選択）（デフォルト）
 ;
 ;    croquisRandomExcludeModes
 ;      → ランダムモード（croquisMode = 0）のとき、選択肢から除外したいモード番号を
@@ -132,6 +182,14 @@ workGoalLogPath := A_ScriptDir "\work_goal.txt"
 ;        モード1は croquis_models_1、モード2は croquis_models_2、
 ;        モード3は croquis_models_3 のように、モードごとに別フォルダから
 ;        ランダムに画像を選びます（フォルダは事前に作成し、画像を入れておくこと）
+;        モード5は画像を使わないため空文字のままで構いません
+;
+;    croquisModeParams の interSecs
+;      → セットとセットの間の待機時間（秒）だけでなく、【最初のセットが
+;        始まる前の待機時間】としても使われます（クリップボードにコピー済みの
+;        画像をサブビューに貼り付ける時間、またはモード5の場合は教本を
+;        開く準備時間）。セットが1つしかないモード（1・5）でも、この値が
+;        そのまま最初の待機時間として使われるので 0 のままにしないこと
 ;
 ;    croquisDelayMinutes
 ;      → スリープ復帰後、クロッキー開始までの待機時間（分）
@@ -144,16 +202,20 @@ croquisRandomExcludeModes := [2]   ; 例: [4] と書けばモード4をランダ
 croquisDelayMinutes := 5
 croquisUsedLog      := A_ScriptDir "\croquis_used.txt"   ; 全モード共通の使用済みリスト（1ファイルで一元管理）
 croquisShotDir      := A_ScriptDir "\croquis_shots"   ; lock_window.ahk と合わせること
+croquisModeCyclePath := A_ScriptDir "\croquis_mode_cycle.txt"   ; ランダムモードの「一周するまで被りなし」用（変更不要）
 
 ; モード別パラメータ（フォルダもここでモードごとに指定）
 croquisModeParams := Map(
-    1, {lockSecs: 1500, sets: 1, interSecs:   0, folder: A_ScriptDir "\croquis_models_1"},
+    1, {lockSecs: 1500, sets: 1, interSecs:  60, folder: A_ScriptDir "\croquis_models_1"},
     2, {lockSecs:  900, sets: 2, interSecs: 120, folder: A_ScriptDir "\croquis_models_2"},
     3, {lockSecs:  300, sets: 5, interSecs:  60, folder: A_ScriptDir "\croquis_models_3"},
     ; モード4：時間割はモード2と同じ（15分×2セット）。1セット目は通常どおり画像を見て描き、
     ; 2セット目は新しい画像を選ばず、1セット目のモデルを記憶を頼りに描く練習用モード。
     ; そのため画像プールはモード2と共用（croquis_models_2）でよい。
-    4, {lockSecs:  900, sets: 2, interSecs: 120, folder: A_ScriptDir "\croquis_models_2"}
+    4, {lockSecs:  900, sets: 2, interSecs: 120, folder: A_ScriptDir "\croquis_models_2"},
+    ; モード5：教本の模写用。画像は一切使わないため folder は空文字。
+    ; interSecs（5分）は開始前に教本を開く準備時間として使う。
+    5, {lockSecs: 1500, sets: 1, interSecs: 300, folder: ""}
 )
 
 ; ================================================================
@@ -405,10 +467,7 @@ StartWakeRoutine() {
     ; 睡眠明け＝新しい1日の開始とみなし、日付境界（dayId）を1つ進める。
     ; 作業ノルマ・残業時間の判定はカレンダー日付ではなくこの値を基準にする。
     currentDayId += 1
-    try {
-        FileDelete(dayStatePath)
-        FileAppend(currentDayId, dayStatePath)
-    }
+    SafeWriteFile(dayStatePath, currentDayId)
 
     ; 就寝ブロックが実行されていれば起床時に解除
     if FileExist(nightBlockFlagPath) {
@@ -442,7 +501,7 @@ OnManualWakeRoutine(*) {
     }
 
     phaseNow := ""
-    try phaseNow := Trim(FileRead(phaseFile))
+    try phaseNow := Trim(SafeReadFile(phaseFile))
     if (phaseNow != "") {
         TrayTip("⚠️ 実行できません", "作業タイマーが既に起動中のようです", "Mute")
         return
@@ -484,7 +543,7 @@ CheckLongIdleWake() {
 
     ; lock_window.ahk が既に動作中なら何もしない
     phaseNow := ""
-    try phaseNow := Trim(FileRead(phaseFile))
+    try phaseNow := Trim(SafeReadFile(phaseFile))
     if (phaseNow != "")
         return
 
@@ -1007,10 +1066,11 @@ PickCroquisImage(mode) {
 
 ; ===== クロッキー起動（変更不要）=====
 LaunchCroquis() {
-    global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, delayMinutes, countdownEnd, countdownMode
+    global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, croquisModeCyclePath, delayMinutes, countdownEnd, countdownMode
 
     ; ランダムモード（croquisMode = 0）の場合、既存モードの中から毎回ランダムに1つ選ぶ
     ; ※ croquisMode 自体（設定値）は書き換えない。今回の起動用に一時的に決めるだけ
+    ; 【要望】全モードを一周するまでは被りなしで選び、一周したらまた全モードから選び直す
     targetMode := croquisMode
     if (croquisMode = 0) {
         availableModes := []
@@ -1030,30 +1090,79 @@ LaunchCroquis() {
             for k, v in croquisModeParams
                 availableModes.Push(k)
         }
-        targetMode := availableModes[Random(1, availableModes.Length)]
-        TrayTip("🎲 ランダムモード", "今回はモード" targetMode "が選ばれました", "Mute")
+
+        ; このサイクルで既に選ばれたモードを読み込む
+        usedModes := []
+        raw := Trim(SafeReadFile(croquisModeCyclePath))
+        if (raw != "") {
+            for part in StrSplit(raw, ",") {
+                try usedModes.Push(Integer(part))
+            }
+        }
+
+        ; 候補から「このサイクルでまだ選ばれていないモード」だけを残す
+        ; （croquisRandomExcludeModes が前回起動時と変わっていても、単純に
+        ;   availableModes と usedModes の差分を取るだけなので自然に整合する）
+        remainingModes := []
+        for m in availableModes {
+            isUsed := false
+            for u in usedModes {
+                if (u = m) {
+                    isUsed := true
+                    break
+                }
+            }
+            if (!isUsed)
+                remainingModes.Push(m)
+        }
+
+        ; 候補が尽きた（1周した）場合は、そこでリセットして全候補から選び直す
+        cycleReset := (remainingModes.Length = 0)
+        if (cycleReset) {
+            remainingModes := availableModes.Clone()
+            usedModes := []
+        }
+
+        targetMode := remainingModes[Random(1, remainingModes.Length)]
+        usedModes.Push(targetMode)
+
+        usedStr := ""
+        for i, m in usedModes
+            usedStr .= (i = 1 ? "" : ",") m
+        SafeWriteFile(croquisModeCyclePath, usedStr)
+
+        cycleNote := cycleReset ? "（新しい周を開始）" : "（残り" (remainingModes.Length - 1) "モード）"
+        TrayTip("🎲 ランダムモード", "今回はモード" targetMode "が選ばれました " cycleNote, "Mute")
     }
 
     ; モードパラメータ取得（未定義なら1にフォールバック）
     params := croquisModeParams.Has(targetMode) ? croquisModeParams[targetMode] : croquisModeParams[1]
     useMode := croquisModeParams.Has(targetMode) ? targetMode : 1
 
-    if (!DirExist(params.folder)) {
-        TrayTip("⚠️ クロッキースキップ", "モード" useMode "の画像フォルダが見つかりません：" params.folder, "Mute")
-        LaunchMain()
-        return
-    }
+    ; モード5（教本の模写）は画像を一切使わないため、フォルダ確認・画像選択・
+    ; クリップボードコピーをすべてスキップする
+    noImageMode := (useMode = 5)
 
-    imgPath := PickCroquisImage(useMode)
-    if (imgPath = "") {
-        TrayTip("⚠️ クロッキースキップ", "モード" useMode "のフォルダ内に画像が見つかりませんでした", "Mute")
-        LaunchMain()
-        return
-    }
+    if (!noImageMode) {
+        if (!DirExist(params.folder)) {
+            TrayTip("⚠️ クロッキースキップ", "モード" useMode "の画像フォルダが見つかりません：" params.folder, "Mute")
+            LaunchMain()
+            return
+        }
 
-    ; 画像をクリップボードにコピー
-    CopyImageToClipboard(imgPath)
-    TrayTip("🎨 クロッキー開始", "モデル画像をクリップボードにコピーしました`nクリスタのサブビューに貼り付けてください", "Mute")
+        imgPath := PickCroquisImage(useMode)
+        if (imgPath = "") {
+            TrayTip("⚠️ クロッキースキップ", "モード" useMode "のフォルダ内に画像が見つかりませんでした", "Mute")
+            LaunchMain()
+            return
+        }
+
+        ; 画像をクリップボードにコピー
+        CopyImageToClipboard(imgPath)
+        TrayTip("🎨 クロッキー開始", "モデル画像をクリップボードにコピーしました`nクリスタのサブビューに貼り付けてください", "Mute")
+    } else {
+        TrayTip("📖 クロッキー開始（教本模写）", "教本を開いて準備してください", "Mute")
+    }
 
     ; lock_window.ahk を /croquis モードで起動（パラメータとモード番号を引数で渡す）
     ; モード番号を渡すのは、セット間の次画像選択（lock_window.ahk側）でも
@@ -1067,7 +1176,7 @@ LaunchCroquis() {
 WaitForCroquisEnd() {
     ; lock_window.ahk が終了したか確認（フェーズファイルが空になった）
     phaseNow := ""
-    try phaseNow := Trim(FileRead(A_ScriptDir "\current_phase.txt"))
+    try phaseNow := Trim(SafeReadFile(A_ScriptDir "\current_phase.txt"))
 
     ; プロセスが存在するか確認
     lockRunning := ProcessExist("AutoHotkey64.exe") || ProcessExist("AutoHotkey.exe")
@@ -1075,7 +1184,7 @@ WaitForCroquisEnd() {
     ; フェーズが "croquis_done" になったら通常フローへ移行
     if (phaseNow = "croquis_done") {
         SetTimer(WaitForCroquisEnd, 0)
-        try FileDelete(A_ScriptDir "\current_phase.txt")
+        SafeDeleteFile(A_ScriptDir "\current_phase.txt")
         TrayTip("🎨 クロッキー完了", "作業タイマーを開始します", "Mute")
         LaunchMain()
     }
@@ -1216,7 +1325,7 @@ CheckAbsence() {
 
     ; ロックフェーズ中のみ計測
     phase := ""
-    try phase := Trim(FileRead(phaseFile))
+    try phase := Trim(SafeReadFile(phaseFile))
     if (phase != "lock") {
         ; 監視対象外フェーズに入ったら離席状態をリセット
         ; （運動・食事休憩・中休み・通常休憩中の無操作が復帰後にサボりとして誤記録されるのを防ぐ）
@@ -1298,7 +1407,7 @@ global overtimeDayId     := currentDayId
 global overtimeMs        := 0
 global overtimeLastCheck := 0
 try {
-    _otInit := StrSplit(FileRead(overtimeLogPath), "|")
+    _otInit := StrSplit(SafeReadFile(overtimeLogPath), "|")
     if (Integer(_otInit[1]) = currentDayId)
         overtimeMs := Integer(_otInit[2])
 }
@@ -1347,7 +1456,7 @@ CheckOvertimeWork() {
     ; 本日すでにノルマを達成しているか確認（work_goal.txt は lock_window.ahk が書き込む）
     goalReachedToday := false
     try {
-        _wg := StrSplit(FileRead(workGoalLogPath), "|")
+        _wg := StrSplit(SafeReadFile(workGoalLogPath), "|")
         if (Integer(_wg[1]) = currentDayId && _wg.Length >= 3)
             goalReachedToday := (_wg[3] = "1")
     }
@@ -1359,7 +1468,7 @@ CheckOvertimeWork() {
     ; lock_window.ahk が現在 lock / 中休み中なら、そちらで計測済みのため対象外
     ; （current_phase.txt が読めない＝lock_window.ahk が動いていない場合は "" 扱いになり対象になる）
     phaseNow := ""
-    try phaseNow := Trim(FileRead(phaseFile))
+    try phaseNow := Trim(SafeReadFile(phaseFile))
     if (phaseNow = "lock" || phaseNow = "intermission") {
         overtimeLastCheck := 0
         return
@@ -1379,8 +1488,7 @@ CheckOvertimeWork() {
     }
     overtimeLastCheck := now
 
-    try FileDelete(overtimeLogPath)
-    FileAppend(currentDayId "|" overtimeMs, overtimeLogPath)
+    SafeWriteFile(overtimeLogPath, currentDayId "|" overtimeMs)
 }
 
 ; ================================================================
@@ -1424,7 +1532,7 @@ UpdateIdleIconTip() {
     todayActiveMin    := 0
     todayEffGoalMin   := totalWorkGoalMinutes
     try {
-        _wg := StrSplit(FileRead(workGoalLogPath), "|")
+        _wg := StrSplit(SafeReadFile(workGoalLogPath), "|")
         if (Integer(_wg[1]) = currentDayId && _wg.Length >= 3) {
             goalReachedToday := (_wg[3] = "1")
             todayActiveMin   := Round(Integer(_wg[2]) / 60000)
@@ -1439,7 +1547,7 @@ UpdateIdleIconTip() {
 
     todayOvertimeMin := 0
     try {
-        _ot := StrSplit(FileRead(overtimeLogPath), "|")
+        _ot := StrSplit(SafeReadFile(overtimeLogPath), "|")
         if (Integer(_ot[1]) = currentDayId)
             todayOvertimeMin := Round(Integer(_ot[2]) / 60000)
     }

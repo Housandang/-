@@ -16,9 +16,57 @@ global isCroquis     := false   ; 起動モード判定より先に宣言（OnEx
 
 WritePhase(phase) {
     _path := A_ScriptDir "\current_phase.txt"
-    try FileDelete(_path)
-    if (phase != "")
-        FileAppend(phase, _path)
+    if (phase = "")
+        SafeDeleteFile(_path)
+    else
+        SafeWriteFile(_path, phase)
+}
+
+; ================================================================
+; ★ 複数プロセスからの同時アクセス対策（変更不要）
+;
+;    current_phase.txt・work_goal.txt・overtime_work.txt・day_state.txt は
+;    lock_window.ahk と launcher.ahk の両方から読み書きされる共有ファイル。
+;    お互い独立したプロセスなので、書き込み中のファイルを別プロセスが
+;    ちょうど同時に読もうとする（あるいはその逆）と、Windowsのファイル共有
+;    違反（エラー32「別のプロセスが使用中です」）が発生することがある。
+;    通常は一瞬で解消される一時的な競合なので、短い待機を挟んで
+;    数回リトライすることで対処する。
+; ================================================================
+SafeReadFile(path, retries := 5, delayMs := 30) {
+    loop retries {
+        try
+            return FileRead(path)
+        catch {
+            Sleep(delayMs)
+        }
+    }
+    return ""
+}
+
+SafeDeleteFile(path, retries := 5, delayMs := 30) {
+    loop retries {
+        try {
+            FileDelete(path)
+            return true
+        } catch {
+            Sleep(delayMs)
+        }
+    }
+    return false
+}
+
+SafeWriteFile(path, content, retries := 5, delayMs := 30) {
+    loop retries {
+        SafeDeleteFile(path, 1, 0)   ; 無ければ無いで良いので1回だけ試して失敗は無視
+        try {
+            FileAppend(content, path)
+            return true
+        } catch {
+            Sleep(delayMs)
+        }
+    }
+    return false
 }
 
 OnExit(CleanupPhaseFile)
@@ -29,8 +77,7 @@ CleanupPhaseFile(reason, code) {
 
     ; フェーズファイルの実際の内容を読む
     ; （g.phase が "break" のままでも WritePhase("croquis_done") 済みの場合があるため）
-    actualPhase := ""
-    try actualPhase := Trim(FileRead(A_ScriptDir "\current_phase.txt"))
+    actualPhase := Trim(SafeReadFile(A_ScriptDir "\current_phase.txt"))
 
     ; croquis_done はlauncherが読むまで保持する
     if (actualPhase != "croquis_done")
@@ -516,7 +563,7 @@ overtimeLogPath       := A_ScriptDir "\overtime_work.txt"   ; launcher.ahk が�
 ; このファイルは launcher.ahk のみが書き込み、lock_window.ahk 側は起動時に読み取るだけ。
 dayStatePath := A_ScriptDir "\day_state.txt"
 currentDayId := 1
-try currentDayId := Integer(Trim(FileRead(dayStatePath)))
+try currentDayId := Integer(Trim(SafeReadFile(dayStatePath)))
 
 ; ================================================================
 ; ★ 休憩延期の設定
@@ -559,7 +606,7 @@ _workGoalReached  := false
 _effectiveGoalMin := totalWorkGoalMinutes
 if (totalWorkGoalMinutes != 0) {
     try {
-        _workGoalData := StrSplit(FileRead(workGoalLogPath), "|")
+        _workGoalData := StrSplit(SafeReadFile(workGoalLogPath), "|")
         _storedDayId  := Integer(_workGoalData[1])
 
         if (_storedDayId = currentDayId) {
@@ -578,7 +625,7 @@ if (totalWorkGoalMinutes != 0) {
             ; （ノルマ達成後にこのスクリプトを終了して、ロック外で追加作業した分）
             _prevOvertimeMin := 0
             try {
-                _otData := StrSplit(FileRead(overtimeLogPath), "|")
+                _otData := StrSplit(SafeReadFile(overtimeLogPath), "|")
                 if (Integer(_otData[1]) = currentDayId - 1)
                     _prevOvertimeMin := Round(Integer(_otData[2]) / 60000)
             }
@@ -592,8 +639,7 @@ if (totalWorkGoalMinutes != 0) {
     ; 本日分（実効ノルマ含む）を即座に保存しておく。
     ; クロッキー→通常作業など、本日中に複数プロセスが立ち上がっても
     ; 同じ実効ノルマを使い続けられるようにするため。
-    try FileDelete(workGoalLogPath)
-    FileAppend(currentDayId "|" _workActiveMs "|" (_workGoalReached ? "1" : "0") "|" _effectiveGoalMin, workGoalLogPath)
+    SafeWriteFile(workGoalLogPath, currentDayId "|" _workActiveMs "|" (_workGoalReached ? "1" : "0") "|" _effectiveGoalMin)
 }
 
 global effectiveWorkGoalMinutes := _effectiveGoalMin
@@ -1262,8 +1308,7 @@ CheckActiveWork() {
     ; 4項目目に本日の実効ノルマも保存し、翌日の繰り越し計算に使う。
     ; dayId は起動時に読み取った固定値をそのまま使う（睡眠を挟まない限り同じ日として扱うため、
     ; ここで日付を再計算する必要はない）
-    try FileDelete(workGoalLogPath)
-    FileAppend(currentDayId "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0") "|" effectiveWorkGoalMinutes, workGoalLogPath)
+    SafeWriteFile(workGoalLogPath, currentDayId "|" g.activeWorkMs "|" (g.workGoalReached ? "1" : "0") "|" effectiveWorkGoalMinutes)
 
     UpdateWorkGoalTip()
 }
@@ -1965,7 +2010,56 @@ RunPomodoroCroquis(targetTitles, lockSecs, totalSets, interSecs) {
     g.croquisInter := interSecs
     g.croquisSet   := 1
 
-    StartNextCroquisSet()
+    ; セット1の開始前にも、セット間と同じ待機（画像貼り付け／教本準備）を挟む。
+    ; 最初の画像は launcher.ahk が起動前にクリップボードへコピー済みなので、
+    ; ここで新しく画像を選ぶ必要はない（貼り付けの案内と待機のみ）。
+    ; interSecs が 0 のモードでは待機画面を出さず、そのままセット1を開始する。
+    if (interSecs > 0)
+        StartCroquisFirstWait(totalSets, interSecs)
+    else
+        StartNextCroquisSet()
+}
+
+; ===== クロッキー・セット1開始前の待機（セット間の待機と同じ仕組み・変更不要）=====
+StartCroquisFirstWait(totalSets, interSecs) {
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisArg
+
+    ; モード5（教本の模写）は画像を一切使わないため、貼り付けの案内は出さない
+    noImageMode := (croquisArg.mode = 5)
+
+    g.generation += 1
+    myGen        := g.generation
+    g.phase      := "break"
+    g.endTick    := A_TickCount + (interSecs * 1000)
+    WritePhase("break")
+
+    timerGui.BackColor := "4A148C"   ; 薄紫：セット間と同じ配色
+    timerTitle.Value   := "🎨 セット開始まで 1/" totalSets
+    timerSub.Value     := noImageMode ? "教本を開いて準備してください" : "サブビューに貼り付けてください"
+    SoundPlay("*48")
+
+    SetTimer(FirstWaitTick, 300)
+
+    FirstWaitTick() {
+        if (g.generation != myGen) {
+            SetTimer(FirstWaitTick, 0)
+            return
+        }
+        if (g.isPaused)
+            return
+
+        rem := g.endTick - A_TickCount
+        if (rem <= 0) {
+            SetTimer(FirstWaitTick, 0)
+            g.focusMode       := true
+            g.focusModeIsAuto := false
+            FocusModeMinimizeWithCountdown()
+            StartNextCroquisSet()
+            return
+        }
+        s := Ceil(rem / 1000)
+        timerCount.Value := Format("00:{:02d}", s)
+    }
 }
 
 StartNextCroquisSet() {

@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>おえかき手帳</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Yomogi&family=Zen+Maru+Gothic:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#3a3845;
+    --ink-soft:#8b8698;
+    --paper:#fbf8f2;
+    --paper-line:#e7e0d2;
+    --gold:#c9a66b;
+    --blue:#7c93a8;
+    --raspberry:#b24c63;
+    --shadow: 0 8px 24px rgba(58,56,69,0.16);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    min-height:100vh;
+    background:
+      radial-gradient(circle at 20% 10%, #4a4658 0%, transparent 45%),
+      linear-gradient(160deg,#2f2d3a 0%, #3a3845 55%, #463f52 100%);
+    font-family:'Zen Maru Gothic', sans-serif;
+    color:var(--ink);
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding:28px 14px 60px;
+  }
+
+  .app-shell{
+    width:100%;
+    max-width:420px;
+    background:var(--paper);
+    border-radius:22px;
+    overflow:hidden;
+    box-shadow:var(--shadow);
+    position:relative;
+    opacity:0;
+    transform:translateY(10px);
+    animation:riseIn .5s ease forwards;
+  }
+  @keyframes riseIn{ to{opacity:1; transform:translateY(0);} }
+
+  /* 綴じ紐風のバインダー穴（控えめな質感） */
+  .app-shell::before{
+    content:"";
+    position:absolute;
+    left:0; top:0; bottom:0; width:16px;
+    background:
+      radial-gradient(circle, rgba(58,56,69,0.14) 3px, transparent 3.2px) repeat-y;
+    background-size:16px 30px;
+    background-position:8px 14px;
+    opacity:.55;
+    z-index:2;
+  }
+
+  .cover{
+    background:var(--ink);
+    color:var(--paper);
+    padding:18px 22px 20px 30px;
+    position:relative;
+  }
+  .cover-label{
+    font-size:11px;
+    letter-spacing:.18em;
+    color:#c9c4d6;
+    margin:0 0 6px;
+  }
+  .cover-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+  }
+  .nav-btn{
+    background:rgba(255,255,255,0.08);
+    border:none;
+    color:var(--paper);
+    width:34px; height:34px;
+    border-radius:50%;
+    font-size:16px;
+    cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    transition:background .15s ease, transform .15s ease;
+  }
+  .nav-btn:hover{ background:rgba(255,255,255,0.18); }
+  .nav-btn:active{ transform:scale(.9); }
+  .nav-btn:disabled{ opacity:.25; cursor:default; }
+  .nav-btn:disabled:hover{ background:rgba(255,255,255,0.08); }
+
+  .month-title{
+    font-family:'Yomogi', cursive;
+    font-size:26px;
+    line-height:1;
+  }
+
+  .stat-pill{
+    margin-top:12px;
+    display:inline-flex;
+    gap:14px;
+    background:rgba(255,255,255,0.08);
+    border:1px solid rgba(255,255,255,0.14);
+    padding:6px 14px;
+    border-radius:999px;
+    font-size:12.5px;
+    color:#efe9da;
+  }
+  .stat-pill b{ color:var(--gold); font-weight:700; }
+
+  .page{
+    padding:18px 16px 22px 30px;
+    background:
+      radial-gradient(circle, var(--paper-line) 1px, transparent 1.3px) 0 0/16px 16px,
+      var(--paper);
+  }
+
+  .weekdays{
+    display:grid;
+    grid-template-columns:repeat(7,1fr);
+    margin-bottom:6px;
+  }
+  .weekdays span{
+    text-align:center;
+    font-size:11.5px;
+    color:var(--ink-soft);
+    font-weight:700;
+  }
+  .weekdays span:first-child{ color:#c98b93; }
+  .weekdays span:last-child{ color:var(--blue); }
+
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(7,1fr);
+    gap:6px;
+  }
+
+  .cell{
+    aspect-ratio:1/1;
+    position:relative;
+    border-radius:12px;
+    border:1px solid var(--paper-line);
+    background:#fffefb;
+    display:flex;
+    align-items:flex-start;
+    justify-content:flex-start;
+    padding:4px 5px;
+    cursor:pointer;
+    transition:transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+  }
+  .cell.blank{ visibility:hidden; cursor:default; }
+  .cell.future{ cursor:default; color:#d7d2c4; background:#f5f2ea; }
+  .cell.future .daynum{ color:#cfc9ba; }
+  .cell:not(.blank):not(.future):hover{ transform:translateY(-2px); box-shadow:0 6px 14px rgba(58,56,69,0.12); border-color:var(--gold); }
+
+  .cell.today{ border:1.5px solid var(--raspberry); }
+  .cell.today::after{
+    content:"";
+    position:absolute;
+    top:-6px; right:-8px;
+    width:26px; height:12px;
+    background:var(--gold);
+    opacity:.85;
+    transform:rotate(18deg);
+    border-radius:2px;
+    box-shadow:0 2px 3px rgba(0,0,0,0.15);
+  }
+
+  .daynum{
+    font-size:11px;
+    color:var(--ink-soft);
+    font-weight:700;
+    z-index:1;
+  }
+
+  .sticker{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:26px;
+    animation:pop .32s cubic-bezier(.34,1.56,.64,1);
+  }
+  .sticker .badge{
+    width:78%; height:78%;
+    border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-size:20px;
+    box-shadow:0 2px 4px rgba(58,56,69,0.18), inset 0 0 0 2px rgba(255,255,255,0.5);
+  }
+  @keyframes pop{
+    0%{ transform:scale(.3) rotate(-30deg); opacity:0;}
+    70%{ transform:scale(1.15) rotate(6deg); opacity:1;}
+    100%{ transform:scale(1) rotate(var(--tilt,0deg));}
+  }
+
+  .empty-note{
+    margin:14px 2px 2px;
+    font-size:12.5px;
+    color:var(--ink-soft);
+    line-height:1.6;
+    background:#f4efe2;
+    border:1px dashed var(--paper-line);
+    border-radius:10px;
+    padding:10px 12px;
+  }
+
+  /* ---- ピッカー（シールシート） ---- */
+  .scrim{
+    position:fixed; inset:0;
+    background:rgba(42,40,52,0.45);
+    opacity:0; pointer-events:none;
+    transition:opacity .2s ease;
+    z-index:10;
+  }
+  .scrim.open{ opacity:1; pointer-events:auto; }
+
+  .sheet{
+    position:fixed;
+    left:50%; bottom:0;
+    transform:translate(-50%,100%);
+    width:100%; max-width:420px;
+    background:var(--paper);
+    border-radius:20px 20px 0 0;
+    box-shadow:0 -10px 30px rgba(0,0,0,0.25);
+    padding:16px 18px 22px;
+    transition:transform .28s cubic-bezier(.32,.72,0,1);
+    z-index:11;
+  }
+  .sheet.open{ transform:translate(-50%,0); }
+
+  .sheet-handle{
+    width:36px; height:4px; background:var(--paper-line);
+    border-radius:99px; margin:0 auto 12px;
+  }
+  .sheet-head{
+    display:flex; justify-content:space-between; align-items:center;
+    margin-bottom:12px;
+  }
+  .sheet-title{
+    font-family:'Yomogi',cursive;
+    font-size:18px;
+  }
+  .sheet-title span{ color:var(--raspberry); }
+  .remove-btn{
+    border:none; background:none;
+    color:var(--ink-soft);
+    font-size:12.5px;
+    text-decoration:underline;
+    cursor:pointer;
+    padding:4px;
+  }
+
+  .sticker-sheet{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    justify-content:center;
+    padding-top:4px;
+  }
+  .sticker-opt{
+    width:56px; height:56px;
+    border-radius:50%;
+    border:2px dashed #d8d2c2;
+    display:flex; align-items:center; justify-content:center;
+    font-size:24px;
+    cursor:pointer;
+    background:#fffefb;
+    transition:transform .15s ease, border-color .15s ease;
+  }
+  .sticker-opt:hover{ transform:translateY(-3px) scale(1.05); }
+  .sticker-opt:active{ transform:scale(.92); }
+  .sticker-opt.selected{ border-color:var(--raspberry); border-style:solid; }
+
+  .loading, .error{
+    padding:40px 20px;
+    text-align:center;
+    color:var(--ink-soft);
+    font-size:13px;
+  }
+</style>
+</head>
+<body>
+
+<div class="app-shell" id="app">
+  <div class="cover">
+    <p class="cover-label">SHIRUSHI TECHO</p>
+    <div class="cover-row">
+      <button class="nav-btn" id="prevBtn" aria-label="前の月">‹</button>
+      <div class="month-title" id="monthTitle">-</div>
+      <button class="nav-btn" id="nextBtn" aria-label="次の月">›</button>
+    </div>
+    <div class="stat-pill" id="statPill">読み込み中…</div>
+  </div>
+
+  <div class="page">
+    <div class="weekdays">
+      <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="empty-note" id="emptyNote" style="display:none;">
+      今月はまだシールがありません。絵を投稿できたら、その日をタップして貼ってみましょう🌸
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="sheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-head">
+    <div class="sheet-title"><span id="sheetDate">-</span> に貼るシール</div>
+    <button class="remove-btn" id="removeBtn" style="display:none;">はがす</button>
+  </div>
+  <div class="sticker-sheet" id="stickerOptions"></div>
+</div>
+
+<script>
+(function(){
+  const STORAGE_KEY = "sticker-techo-data";
+  const STICKERS = [
+    { id:"sakura",  emoji:"🌸", bg:"#f6d6de" },
+    { id:"star",    emoji:"⭐", bg:"#f2e3b8" },
+    { id:"clover",  emoji:"🍀", bg:"#d9ebda" },
+    { id:"moon",    emoji:"🌙", bg:"#d9e4ee" },
+    { id:"palette", emoji:"🎨", bg:"#e4d9ed" },
+    { id:"peach",   emoji:"🍑", bg:"#f6dfcf" },
+    { id:"sparkle", emoji:"✨", bg:"#efe7cf" },
+    { id:"butterfly", emoji:"🦋", bg:"#e7dcef" },
+  ];
+  const STICKER_MAP = Object.fromEntries(STICKERS.map(s => [s.id, s]));
+
+  let data = {};        // { "2026-08-03": "sakura", ... }
+  let viewYear, viewMonth; // viewMonth: 0-11
+  let activeDate = null;
+  let loaded = false;
+
+  const todayObj = new Date();
+  const todayKey = fmtKey(todayObj);
+  viewYear = todayObj.getFullYear();
+  viewMonth = todayObj.getMonth();
+
+  const $ = (id) => document.getElementById(id);
+
+  function fmtKey(d){
+    return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+  }
+
+  function tiltFor(key){
+    // 日付ごとに一意な小さな傾きを作る（手貼り感）
+    let h = 0;
+    for (let i=0;i<key.length;i++) h = (h*31 + key.charCodeAt(i)) % 360;
+    return (h % 17) - 8; // -8deg 〜 8deg
+  }
+
+  async function loadData(){
+    try {
+      const res = await window.storage.get(STORAGE_KEY, false);
+      data = res && res.value ? JSON.parse(res.value) : {};
+    } catch(e){
+      data = {};
+    }
+    loaded = true;
+  }
+
+  async function saveData(){
+    try {
+      await window.storage.set(STORAGE_KEY, JSON.stringify(data), false);
+    } catch(e){
+      console.error("保存に失敗しました", e);
+    }
+  }
+
+  function computeStreak(){
+    let streak = 0;
+    let cursor = new Date(todayObj);
+    // 今日がまだ未記入なら昨日から数える
+    if (!data[fmtKey(cursor)]) cursor.setDate(cursor.getDate()-1);
+    while (data[fmtKey(cursor)]){
+      streak++;
+      cursor.setDate(cursor.getDate()-1);
+    }
+    return streak;
+  }
+
+  function countInMonth(y,m){
+    let c = 0;
+    for (const k in data){
+      const [ky,km] = k.split("-").map(Number);
+      if (ky===y && km===m+1) c++;
+    }
+    return c;
+  }
+
+  function renderHeader(){
+    $("monthTitle").textContent = viewYear + "年 " + (viewMonth+1) + "月";
+    const streak = computeStreak();
+    const monthCount = countInMonth(viewYear, viewMonth);
+    $("statPill").innerHTML = `🔥 連続<b> ${streak} </b>日　・　今月<b> ${monthCount} </b>枚`;
+
+    const isCurrentRealMonth = (viewYear === todayObj.getFullYear() && viewMonth === todayObj.getMonth());
+    $("nextBtn").disabled = isCurrentRealMonth;
+  }
+
+  function renderGrid(){
+    const grid = $("grid");
+    grid.innerHTML = "";
+    const firstDow = new Date(viewYear, viewMonth, 1).getDay();
+    const daysInMonth = new Date(viewYear, viewMonth+1, 0).getDate();
+
+    for (let i=0;i<firstDow;i++){
+      const blank = document.createElement("div");
+      blank.className = "cell blank";
+      grid.appendChild(blank);
+    }
+
+    for (let d=1; d<=daysInMonth; d++){
+      const dateObj = new Date(viewYear, viewMonth, d);
+      const key = fmtKey(dateObj);
+      const isFuture = dateObj > todayObj && key !== todayKey;
+      const isToday = key === todayKey;
+
+      const cell = document.createElement("div");
+      cell.className = "cell" + (isFuture ? " future" : "") + (isToday ? " today" : "");
+
+      const num = document.createElement("span");
+      num.className = "daynum";
+      num.textContent = d;
+      cell.appendChild(num);
+
+      const stickerId = data[key];
+      if (stickerId && STICKER_MAP[stickerId]){
+        const s = STICKER_MAP[stickerId];
+        const wrap = document.createElement("div");
+        wrap.className = "sticker";
+        wrap.style.setProperty("--tilt", tiltFor(key)+"deg");
+        wrap.innerHTML = `<div class="badge" style="background:${s.bg}">${s.emoji}</div>`;
+        cell.appendChild(wrap);
+      }
+
+      if (!isFuture){
+        cell.addEventListener("click", () => openSheet(key));
+      }
+      grid.appendChild(cell);
+    }
+
+    const note = $("emptyNote");
+    note.style.display = countInMonth(viewYear, viewMonth) === 0 ? "block" : "none";
+  }
+
+  function renderAll(){
+    renderHeader();
+    renderGrid();
+  }
+
+  function openSheet(key){
+    activeDate = key;
+    const [y,m,d] = key.split("-").map(Number);
+    $("sheetDate").textContent = `${m}月${d}日`;
+
+    const current = data[key];
+    $("removeBtn").style.display = current ? "inline-block" : "none";
+
+    const opts = $("stickerOptions");
+    opts.innerHTML = "";
+    STICKERS.forEach(s => {
+      const btn = document.createElement("div");
+      btn.className = "sticker-opt" + (current === s.id ? " selected" : "");
+      btn.style.background = s.bg;
+      btn.textContent = s.emoji;
+      btn.addEventListener("click", () => selectSticker(key, s.id));
+      opts.appendChild(btn);
+    });
+
+    $("scrim").classList.add("open");
+    $("sheet").classList.add("open");
+  }
+
+  function closeSheet(){
+    $("scrim").classList.remove("open");
+    $("sheet").classList.remove("open");
+    activeDate = null;
+  }
+
+  async function selectSticker(key, stickerId){
+    data[key] = stickerId;
+    await saveData();
+    closeSheet();
+    renderAll();
+  }
+
+  async function removeSticker(){
+    if (!activeDate) return;
+    delete data[activeDate];
+    await saveData();
+    closeSheet();
+    renderAll();
+  }
+
+  $("prevBtn").addEventListener("click", () => {
+    viewMonth--;
+    if (viewMonth < 0){ viewMonth = 11; viewYear--; }
+    renderAll();
+  });
+  $("nextBtn").addEventListener("click", () => {
+    if ($("nextBtn").disabled) return;
+    viewMonth++;
+    if (viewMonth > 11){ viewMonth = 0; viewYear++; }
+    renderAll();
+  });
+  $("scrim").addEventListener("click", closeSheet);
+  $("removeBtn").addEventListener("click", removeSticker);
+
+  (async function init(){
+    await loadData();
+    renderAll();
+  })();
+})();
+</script>
+</body>
+</html>
