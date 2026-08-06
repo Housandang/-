@@ -310,6 +310,7 @@ trayMenu.Add("🌙 就寝モード開始 (" nightBlockDelay " 分後にスマホ
 trayMenu.Add("🌙 就寝モードをキャンセル", OnNightModeCancel)
 trayMenu.Add()
 trayMenu.Add("🔁 スリープ解除ルーティンを手動実行 (" delayMinutes "分待機→クロッキー→作業)", OnManualWakeRoutine)
+trayMenu.Add("🧪 右脳ドローイング（テスト実行）", OnFastCroquisTest)
 
 ; トレイアイコンのダブルクリックでカウントダウンGUIを最前面に戻す
 OnMessage(0x404, OnTrayDblClick)
@@ -509,6 +510,32 @@ OnManualWakeRoutine(*) {
 
     TrayTip("🔁 スリープ解除ルーティン", delayMinutes "分待機 → クロッキー → 作業 を開始します", "Mute")
     StartWakeRoutine()
+}
+
+; ===== 右脳ドローイング：テスト実行（トレイメニュー専用・変更不要）=====
+;
+;    croquisModeParams には登録していない、テスト専用の入口。
+;    起床ルーティン（待機・カウントダウン）は挟まず、その場で直接
+;    lock_window.ahk をモード6・テストフラグ付きで起動する。
+;    テスト実行では croquis_used_fast.txt への書き込み（使用済みマーク）を
+;    行わないため、何度実行しても画像プールは消費されない。
+;    終了は lock_window.ahk 側が単独で完結させるため（作業タイマーへの
+;    引き継ぎは行わない）、ここでは起動するだけで監視は不要。
+OnFastCroquisTest(*) {
+    global scriptPath, phaseFile
+
+    phaseNow := ""
+    try phaseNow := Trim(SafeReadFile(phaseFile))
+    if (phaseNow != "") {
+        TrayTip("⚠️ 実行できません", "作業タイマーが既に起動中のようです", "Mute")
+        return
+    }
+
+    TrayTip("🧪 右脳ドローイング（テスト）", "60秒 × 25セットのテストを開始します", "Mute")
+    ; /croquis:lockSecs:sets:interSecs:mode:test
+    ;   60秒 × 25セット、開始前の待機180秒（参照ウィンドウの位置調整用）、
+    ;   モード6、テストフラグ=1
+    Run('"' scriptPath '" /croquis:60:25:180:6:1')
 }
 
 ; ===== 無操作時間ベースの起床検知（変更不要）=====
@@ -1467,9 +1494,11 @@ CheckOvertimeWork() {
 
     ; lock_window.ahk が現在 lock / 中休み中なら、そちらで計測済みのため対象外
     ; （current_phase.txt が読めない＝lock_window.ahk が動いていない場合は "" 扱いになり対象になる）
+    ; "lock_test" は右脳ドローイングのテスト実行中を示す値で、これも
+    ; 残業として誤ってカウントしないよう対象外にする
     phaseNow := ""
     try phaseNow := Trim(SafeReadFile(phaseFile))
-    if (phaseNow = "lock" || phaseNow = "intermission") {
+    if (phaseNow = "lock" || phaseNow = "intermission" || phaseNow = "lock_test") {
         overtimeLastCheck := 0
         return
     }

@@ -279,6 +279,38 @@ croquisCaptureWait := 180    ; タイマー終了からスクショ撮影まで�
 croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
 
 ; ================================================================
+; ★ 右脳ドローイング（テスト実行専用・変更不要）
+;
+;    60秒×多数セットで、モデル画像をクリップボード貼り付けではなく
+;    常時最前面の「参照ウィンドウ」に自動表示する特殊モード。
+;    croquisModeParams（launcher.ahk側）には登録しておらず、通常の
+;    croquisMode設定やランダム選択からは絶対に到達しない。
+;    トレイメニューの「🧪 右脳ドローイング（テスト）」からのみ起動できる。
+;
+;    fastCroquisCaptureEvery
+;      → 何セットごとに撮影（croquisCaptureWait秒の待機）を挟むか
+;
+;    fastCroquisFolder
+;      → モデル画像フォルダ（croquis_models_2 を流用。モード2/4と共有）
+;
+;    croquisUsedFastLog
+;      → このモード専用の使用済みリスト（croquis_used.txtとは別ファイル。
+;        一周するまで被りなし→一周でリセット。テスト実行時はここへの
+;        書き込みをスキップするので、テストで画像を消費しない）
+;
+;    fastCroquisRefX/Y/W/H
+;      → 参照ウィンドウの初期位置・サイズ（起動後、ウィンドウ自体を
+;        ドラッグ・リサイズして調整可能。ここの値は初期値のみ）
+; ================================================================
+fastCroquisCaptureEvery := 5
+fastCroquisFolder       := A_ScriptDir "\croquis_models_2"
+croquisUsedFastLog      := A_ScriptDir "\croquis_used_fast.txt"
+fastCroquisRefX := 100
+fastCroquisRefY := 100
+fastCroquisRefW := 400
+fastCroquisRefH := 400
+
+; ================================================================
 ; ★ 中休みモードの設定
 ;
 ;    全セット完了後に入る「中休みモード」の設定です。
@@ -1672,14 +1704,14 @@ ResumeAfterExercise() {
 ; ===== 起動モード判定（変更不要）=====
 global isAuto     := false
 global isCroquis  := false
-global croquisArg := {lockSecs: 1500, sets: 1, interSecs: 0, mode: 1}   ; デフォルトはモード1
+global croquisArg := {lockSecs: 1500, sets: 1, interSecs: 0, mode: 1, isTest: false}   ; デフォルトはモード1
 
 for arg in A_Args {
     if (arg = "/auto")
         isAuto := true
     if (SubStr(arg, 1, 8) = "/croquis") {
         isCroquis := true
-        ; /croquis:lockSecs:sets:interSecs:mode の形式で受け取る
+        ; /croquis:lockSecs:sets:interSecs:mode:test の形式で受け取る
         parts := StrSplit(arg, ":")
         if (parts.Length >= 4) {
             croquisArg.lockSecs  := Integer(parts[2])
@@ -1691,6 +1723,12 @@ for arg in A_Args {
         ; 省略時はモード1として扱う。
         if (parts.Length >= 5)
             croquisArg.mode := Integer(parts[5])
+        ; test（6番目）は「右脳ドローイングのテスト実行」用フラグ。
+        ; 1 のときは croquis_used_fast.txt への書き込み（使用済みマーク）を行わず、
+        ; current_phase.txt にも "lock" ではなく "lock_test" を書き込んで
+        ; launcher.ahk 側のサボり監視・残業計測から除外する。
+        if (parts.Length >= 6)
+            croquisArg.isTest := (parts[6] = "1")
     }
 }
 
@@ -1708,11 +1746,20 @@ if (isCroquis) {
     if !alreadyHas
         targetTitles.Push(exerciseUnlockKey)
 
+    g.targetTitles    := targetTitles
     g.focusMode       := true
     g.focusModeIsAuto := false
 
     timerGui.Show("NoActivate")
-    RunPomodoroCroquis(targetTitles, croquisArg.lockSecs, croquisArg.sets, croquisArg.interSecs)
+
+    ; モード6（右脳ドローイング）は既存モードと大きく仕組みが異なる
+    ; （クリップボード貼り付けではなく参照ウィンドウ自動切り替え）ため、
+    ; 専用のフローに分岐する。croquisModeParams には未登録＝通常のランダム
+    ; 選択やcroquisMode設定からは絶対に到達しない、テスト実行専用の入口。
+    if (croquisArg.mode = 6)
+        RunFastCroquis(croquisArg.sets, croquisArg.lockSecs, croquisArg.interSecs)
+    else
+        RunPomodoroCroquis(targetTitles, croquisArg.lockSecs, croquisArg.sets, croquisArg.interSecs)
 
 } else if (isAuto) {
     targetTitles := []
@@ -2270,9 +2317,252 @@ StartCroquisInterSet(doneSet, totalSets, lockSecs, interSecs) {
     }
 }
 
+; ===== 右脳ドローイング：画像選択（モード6専用・変更不要）=====
+; PickNextCroquisImage() と同じロジックだが、専用フォルダ・専用の使用済み
+; リスト（croquis_used_fast.txt）を使う。croquis_used.txt（他モード共通）
+; とは完全に独立しているので、このモードでどれだけ消費しても他モードの
+; 残数には影響しない。テスト実行（croquisArg.isTest）中は使用済みへの
+; 書き込み自体をスキップする（何度実行しても画像を消費しない）。
+PickFastCroquisImage() {
+    global croquisArg, croquisUsedFastLog, fastCroquisFolder
+
+    exts    := ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]
+    allImgs := []
+    for ext in exts {
+        loop files fastCroquisFolder "\" ext
+            allImgs.Push(A_LoopFileName)
+    }
+    if (allImgs.Length = 0)
+        return ""
+
+    usedList := []
+    try {
+        raw := FileRead(croquisUsedFastLog)
+        loop parse raw, "`n", "`r" {
+            if (Trim(A_LoopField) != "")
+                usedList.Push(Trim(A_LoopField))
+        }
+    }
+
+    unused := []
+    for img in allImgs {
+        used := false
+        for u in usedList {
+            if (StrLower(u) = StrLower(img)) {
+                used := true
+                break
+            }
+        }
+        if (!used)
+            unused.Push(img)
+    }
+
+    ; このモード専用フォルダを全部使い切ったらリセット（このファイルには
+    ; このモードの分しか記録されないので、丸ごと削除するだけでよい）
+    if (unused.Length = 0) {
+        try FileDelete(croquisUsedFastLog)
+        unused := allImgs
+    }
+
+    idx      := Random(1, unused.Length)
+    selected := unused[idx]
+
+    if (!croquisArg.isTest)
+        FileAppend(selected "`n", croquisUsedFastLog)
+
+    return fastCroquisFolder "\" selected
+}
+
+; ===== 右脳ドローイング：参照ウィンドウ（モード6専用・変更不要）=====
+; クリップボード貼り付けの代わりに、常時最前面の小さな専用ウィンドウに
+; モデル画像を直接表示する。60秒ごとにプログラム側で自動的に中身が
+; 切り替わるため、コピー・貼り付けの手作業が一切不要になる。
+global fastRefGui := ""
+
+CreateFastCroquisRefWindow(firstImagePath) {
+    global fastRefGui, fastCroquisRefX, fastCroquisRefY, fastCroquisRefW, fastCroquisRefH
+
+    fastRefGui := Gui("+AlwaysOnTop +Resize", "参照 - 右脳ドローイング")
+    fastRefGui.MarginX := 0
+    fastRefGui.MarginY := 0
+    fastRefGui.BackColor := "000000"
+    fastRefGui.Add("Picture", "x0 y0 w" fastCroquisRefW " h" fastCroquisRefH " vRefPic",
+        firstImagePath != "" ? firstImagePath : "")
+    fastRefGui.Show("x" fastCroquisRefX " y" fastCroquisRefY " w" fastCroquisRefW " h" fastCroquisRefH)
+}
+
+ShowFastCroquisImage(path) {
+    global fastRefGui
+    if (path = "")
+        return
+    try fastRefGui["RefPic"].Value := path
+}
+
+DestroyFastCroquisRefWindow() {
+    global fastRefGui
+    try fastRefGui.Destroy()
+    fastRefGui := ""
+}
+
+; ===== 右脳ドローイング：メインフロー（モード6専用・変更不要）=====
+; 60秒 × totalSets。fastCroquisCaptureEvery セットごとに撮影（croquisCaptureWait
+; 秒待機）を挟み、それ以外のセットは撮影せず即座に次の画像へ切り替える。
+RunFastCroquis(totalSets, lockSecs, preWaitSecs) {
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisArg
+
+    g.totalSets    := totalSets
+    g.lockSecs     := lockSecs
+    g.breakSecs    := 0
+    g.croquisTotal := totalSets
+    g.croquisSet   := 1
+
+    firstImg := PickFastCroquisImage()
+    CreateFastCroquisRefWindow(firstImg)
+
+    ; セット1開始前の待機（参照ウィンドウの位置・サイズ調整用）
+    g.generation += 1
+    myGen     := g.generation
+    g.phase   := "break"
+    g.endTick := A_TickCount + (preWaitSecs * 1000)
+    WritePhase("break")
+
+    timerGui.BackColor := "4A148C"
+    timerTitle.Value   := "🧠 右脳ドローイング開始まで"
+    timerSub.Value     := "参照ウィンドウの位置・サイズを調整してください"
+    SoundPlay("*48")
+
+    SetTimer(FastPreWaitTick, 300)
+
+    FastPreWaitTick() {
+        if (g.generation != myGen) {
+            SetTimer(FastPreWaitTick, 0)
+            return
+        }
+        if (g.isPaused)
+            return
+
+        rem := g.endTick - A_TickCount
+        if (rem <= 0) {
+            SetTimer(FastPreWaitTick, 0)
+            StartFastCroquisSet(1, totalSets, lockSecs)
+            return
+        }
+        s := Ceil(rem / 1000)
+        timerCount.Value := Format("00:{:02d}", s)
+    }
+}
+
+StartFastCroquisSet(setNum, totalSets, lockSecs) {
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisArg
+
+    g.currentSet := setNum
+    g.generation += 1
+    myGen     := g.generation
+    g.phase   := "lock"
+    g.endTick := A_TickCount + (lockSecs * 1000)
+    ; テスト実行中は current_phase.txt に "lock" ではなく "lock_test" を書き込み、
+    ; launcher.ahk側のサボり監視・残業計測から除外する
+    ; （g.phase 自体は内部処理のため "lock" のまま。無操作時の自動一時停止などは
+    ;   通常どおり機能させる）
+    WritePhase(croquisArg.isTest ? "lock_test" : "lock")
+
+    timerGui.BackColor := "8B0000"
+    timerTitle.Value   := "🧠 右脳ドローイング  -  " setNum "/" totalSets
+    timerSub.Value     := croquisArg.isTest ? "テスト実行中" : "remaining time"
+    SoundPlay("*48")
+
+    SetTitleMatchMode(2)
+    SetTimer(FastCroquisLockTick, 300)
+
+    FastCroquisLockTick() {
+        global fastCroquisCaptureEvery, croquisCaptureWait
+
+        if (g.generation != myGen) {
+            SetTimer(FastCroquisLockTick, 0)
+            return
+        }
+        if (g.isPaused)
+            return
+
+        ; ブロック対象ウィンドウの最小化（通常ロックと同じ仕組み）
+        for targetTitle in g.targetTitles {
+            winList := WinGetList(targetTitle)
+            for hwnd in winList {
+                try WinMinimize("ahk_id " hwnd)
+            }
+        }
+
+        remaining := g.endTick - A_TickCount
+        if (remaining <= 0) {
+            SetTimer(FastCroquisLockTick, 0)
+
+            isCheckpoint := (Mod(setNum, fastCroquisCaptureEvery) = 0) || (setNum = totalSets)
+
+            if (isCheckpoint) {
+                StartFastCroquisCapture(setNum, totalSets, lockSecs)
+            } else {
+                nextImg := PickFastCroquisImage()
+                ShowFastCroquisImage(nextImg)
+                StartFastCroquisSet(setNum + 1, totalSets, lockSecs)
+            }
+            return
+        }
+        secs := Ceil(remaining / 1000)
+        timerCount.Value := Format("00:{:02d}", secs)
+    }
+}
+
+StartFastCroquisCapture(setNum, totalSets, lockSecs) {
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisCaptureWait
+
+    ; 撮影処理・フェーズ切り替えが完全に終わるまでガードを維持する
+    ; （通常クロッキーと同じ、無操作一時停止が固着するバグへの対策）
+    g.inCaptureWait := true
+    g.generation += 1
+    myGen := g.generation
+
+    FocusModeRestore()
+    timerGui.BackColor := "4A148C"
+    timerTitle.Value   := "🎨 まもなく撮影  -  " setNum "/" totalSets
+    timerSub.Value     := "画面をズームアウトしてください"
+    WritePhase("break")
+
+    captureEnd := A_TickCount + (croquisCaptureWait * 1000)
+    SetTimer(FastCaptureCountdownTick, 300)
+
+    FastCaptureCountdownTick() {
+        if (g.generation != myGen) {
+            SetTimer(FastCaptureCountdownTick, 0)
+            return
+        }
+
+        rem := captureEnd - A_TickCount
+        if (rem <= 0) {
+            SetTimer(FastCaptureCountdownTick, 0)
+
+            CaptureCroquisResult()
+            NextDnsUnblock()
+
+            if (setNum < totalSets) {
+                nextImg := PickFastCroquisImage()
+                ShowFastCroquisImage(nextImg)
+                StartFastCroquisSet(setNum + 1, totalSets, lockSecs)
+            } else {
+                DestroyFastCroquisRefWindow()
+                StartCroquisBreak()
+            }
+
+            g.inCaptureWait := false
+            return
+        }
+        s := Ceil(rem / 1000)
+        timerCount.Value := Format("00:{:02d}", s)
+    }
+}
+
 ; ===== クロッキー後休憩（変更不要）=====
 StartCroquisBreak() {
-    global g, timerGui, timerTitle, timerCount, timerSub, croquisBreakSecs
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisBreakSecs, croquisArg
 
     g.phase   := "break"
     g.endTick := A_TickCount + (croquisBreakSecs * 1000)
@@ -2300,6 +2590,18 @@ StartCroquisBreak() {
         rem := g.endTick - A_TickCount
         if (rem <= 0) {
             SetTimer(CroquisBreakTick, 0)
+
+            ; 右脳ドローイングのテスト実行はあくまでテストなので、
+            ; croquis_done は書かず、作業タイマーへの引き継ぎも行わない。
+            ; 単独で完結して終了する（current_phase.txt は CleanupPhaseFile が
+            ; 空に戻してくれる）。
+            if (croquisArg.isTest) {
+                SoundPlay("*48")
+                TrayTip("🧪 テスト終了", "右脳ドローイングのテスト実行が終了しました", "Mute")
+                ExitApp()
+                return
+            }
+
             WritePhase("croquis_done")
             SoundPlay("*48")
             TrayTip("🎨 クロッキー完了", "作業タイマーを開始します", "Mute")
