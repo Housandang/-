@@ -203,6 +203,7 @@ croquisDelayMinutes := 5
 croquisUsedLog      := A_ScriptDir "\croquis_used.txt"   ; 全モード共通の使用済みリスト（1ファイルで一元管理）
 croquisShotDir      := A_ScriptDir "\croquis_shots"   ; lock_window.ahk と合わせること
 croquisModeCyclePath := A_ScriptDir "\croquis_mode_cycle.txt"   ; ランダムモードの「一周するまで被りなし」用（変更不要）
+croquisSchedulePath  := A_ScriptDir "\croquis_schedule.txt"   ; 週間スケジュール（mode_scheduler.ahk で保存・変更不要）
 
 ; モード別パラメータ（フォルダもここでモードごとに指定）
 croquisModeParams := Map(
@@ -1092,14 +1093,48 @@ PickCroquisImage(mode) {
 }
 
 ; ===== クロッキー起動（変更不要）=====
-LaunchCroquis() {
-    global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, croquisModeCyclePath, delayMinutes, countdownEnd, countdownMode
+; ===== 週間スケジュールの確認（変更不要）=====
+; mode_scheduler.ahk（別スクリプト）で保存された croquis_schedule.txt を読み、
+; 今日の曜日に対応するモードを返す。
+; 土曜日はもともと休み（skipWDays）のためスケジュール対象外。ファイルは
+; 日〜金の6曜日分のみ保存されている（A_WDay: 1=日〜6=金がそのまま添字に一致）。
+; 戻り値: 1〜5 ならそのモードを使う。0 ならスケジュール未設定／その曜日は
+; 「ランダム」に設定済み／土曜日／ファイルが無い・壊れている、のいずれか
+; （呼び出し側で croquisMode 設定・ランダム抽選にフォールバックする）。
+GetScheduledCroquisMode() {
+    global croquisSchedulePath
 
-    ; ランダムモード（croquisMode = 0）の場合、既存モードの中から毎回ランダムに1つ選ぶ
-    ; ※ croquisMode 自体（設定値）は書き換えない。今回の起動用に一時的に決めるだけ
-    ; 【要望】全モードを一周するまでは被りなしで選び、一周したらまた全モードから選び直す
+    if (A_WDay = 7)   ; 土曜日は対象外
+        return 0
+
+    try {
+        raw   := Trim(SafeReadFile(croquisSchedulePath))
+        parts := StrSplit(raw, "|")
+        if (parts.Length = 6) {
+            n := Integer(parts[A_WDay])
+            if (n >= 1 && n <= 5)
+                return n
+        }
+    }
+    return 0
+}
+
+LaunchCroquis() {
+    global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, croquisModeCyclePath, croquisSchedulePath, delayMinutes, countdownEnd, countdownMode
+
+    ; 【要望】週間スケジュール（mode_scheduler.ahk で保存）に今日の曜日の設定があれば、
+    ; croquisMode の設定やランダム抽選より優先してそのモードを使う。
+    ; スケジュール側で「ランダム」に設定されている曜日、またはスケジュール自体が
+    ; 無い・壊れている場合は 0 が返るので、これまでどおりの分岐にフォールバックする。
     targetMode := croquisMode
-    if (croquisMode = 0) {
+    scheduledMode := GetScheduledCroquisMode()
+    if (scheduledMode > 0) {
+        targetMode := scheduledMode
+        TrayTip("📅 スケジュール", "本日はモード" targetMode "です（週間スケジュール設定済み）", "Mute")
+    } else if (croquisMode = 0) {
+        ; ランダムモード（croquisMode = 0）：既存モードの中から毎回ランダムに1つ選ぶ
+        ; ※ croquisMode 自体（設定値）は書き換えない。今回の起動用に一時的に決めるだけ
+        ; 全モードを一周するまでは被りなしで選び、一周したらまた全モードから選び直す
         availableModes := []
         for k, v in croquisModeParams {
             excluded := false
