@@ -170,8 +170,9 @@ workGoalLogPath := A_ScriptDir "\work_goal.txt"
 ;        3 …  5分 × 5枚（セット間に1分休憩）
 ;        4 … 15分 × 2枚相当（モード2と同じ時間割だが、2セット目は画像を選ばない。
 ;            1セット目のモデルを記憶を頼りに描く練習用）
-;        5 … 25分 × 1枚相当だが画像を使わない教本模写用（開始前に5分の準備時間）
-;        0 … ランダムモード（起動のたびに1〜5のいずれかをランダムに選択）（デフォルト）
+;        5 … 60分 × 1枚相当だが画像を使わない教本模写用（開始前に5分の準備時間）
+;        7 … モード5と同じ（画像不要の教本模写）だがタイマーが30分の短縮版
+;        0 … ランダムモード（起動のたびに1〜5・7のいずれかをランダムに選択）（デフォルト）
 ;
 ;    croquisRandomExcludeModes
 ;      → ランダムモード（croquisMode = 0）のとき、選択肢から除外したいモード番号を
@@ -182,13 +183,13 @@ workGoalLogPath := A_ScriptDir "\work_goal.txt"
 ;        モード1は croquis_models_1、モード2は croquis_models_2、
 ;        モード3は croquis_models_3 のように、モードごとに別フォルダから
 ;        ランダムに画像を選びます（フォルダは事前に作成し、画像を入れておくこと）
-;        モード5は画像を使わないため空文字のままで構いません
+;        モード5・7は画像を使わないため空文字のままで構いません
 ;
 ;    croquisModeParams の interSecs
 ;      → セットとセットの間の待機時間（秒）だけでなく、【最初のセットが
 ;        始まる前の待機時間】としても使われます（クリップボードにコピー済みの
-;        画像をサブビューに貼り付ける時間、またはモード5の場合は教本を
-;        開く準備時間）。セットが1つしかないモード（1・5）でも、この値が
+;        画像をサブビューに貼り付ける時間、またはモード5・7の場合は教本を
+;        開く準備時間）。セットが1つしかないモード（1・5・7）でも、この値が
 ;        そのまま最初の待機時間として使われるので 0 のままにしないこと
 ;
 ;    croquisDelayMinutes
@@ -215,8 +216,11 @@ croquisModeParams := Map(
     ; そのため画像プールはモード2と共用（croquis_models_2）でよい。
     4, {lockSecs:  900, sets: 2, interSecs: 120, folder: A_ScriptDir "\croquis_models_2"},
     ; モード5：教本の模写用。画像は一切使わないため folder は空文字。
+    ; 文章を読みながらの作業になり通常のクロッキーより時間がかかるため60分に設定。
     ; interSecs（5分）は開始前に教本を開く準備時間として使う。
-    5, {lockSecs: 1500, sets: 1, interSecs: 300, folder: ""}
+    5, {lockSecs: 3600, sets: 1, interSecs: 300, folder: ""},
+    ; モード7：モード5と全く同じ（教本の模写・画像不要）だが、タイマーが30分の短縮版。
+    7, {lockSecs: 1800, sets: 1, interSecs: 300, folder: ""}
 )
 
 ; ================================================================
@@ -312,6 +316,28 @@ trayMenu.Add("🌙 就寝モードをキャンセル", OnNightModeCancel)
 trayMenu.Add()
 trayMenu.Add("🔁 スリープ解除ルーティンを手動実行 (" delayMinutes "分待機→クロッキー→作業)", OnManualWakeRoutine)
 trayMenu.Add("🧪 右脳ドローイング（テスト実行）", OnFastCroquisTest)
+trayMenu.Add("🚫 本日のクロッキーをスキップ", OnToggleSkipCroquis)
+
+; ===== 本日のクロッキーをスキップ（変更不要）=====
+; トレイメニューでいつでもON/OFFを切り替えられる。ONの間は LaunchCroquis() が
+; 呼ばれても通常のクロッキー処理を全部飛ばし、直接作業タイマーを起動する
+; （手動実行のスリープ解除ルーティンにも効く。右脳ドローイングのテスト実行は
+;   独立した別の仕組みなので影響を受けない）。
+; dayId が変わったタイミングで自動的にOFFへ戻す（StartWakeRoutine() 内）。
+global skipCroquisToday := false
+
+OnToggleSkipCroquis(*) {
+    global skipCroquisToday, trayMenu
+    skipCroquisToday := !skipCroquisToday
+    if (skipCroquisToday)
+        trayMenu.Check("🚫 本日のクロッキーをスキップ")
+    else
+        trayMenu.Uncheck("🚫 本日のクロッキーをスキップ")
+    if (skipCroquisToday)
+        TrayTip("🚫 クロッキーをスキップ", "本日はクロッキーを実行せず、直接作業を開始します", "Mute")
+    else
+        TrayTip("✅ スキップ解除", "本日もいつも通りクロッキーを実行します", "Mute")
+}
 
 ; トレイアイコンのダブルクリックでカウントダウンGUIを最前面に戻す
 OnMessage(0x404, OnTrayDblClick)
@@ -462,14 +488,41 @@ OnPower(wParam, lParam, msg, hwnd) {
 }
 
 ; ===== 待機→クロッキー→作業のルーティンを開始（自動起床・手動実行の共通処理）=====
-StartWakeRoutine() {
+; isManual: 手動実行（OnManualWakeRoutine）からの呼び出しなら true。
+;   自動起床・長時間無操作復帰は、どちらも呼び出し前に「minSleepHours以上の
+;   実際の睡眠・無操作」を確認済みなので、常にdayIdを進めて問題ない。
+;   一方、手動実行だけはその確認をしない（PC再起動後にすぐ手動実行する、
+;   といった使い方を想定しているため）ので、まだ本日のノルマが未達成の
+;   状態でdayIdを進めてしまうと、作業途中の1日を誤って「前日」扱いして
+;   繰り越し計算にかけてしまい、実効ノルマ・進捗が失われる不具合があった。
+StartWakeRoutine(isManual := false) {
     global countdownEnd, countdownMode, showAttempts, delayMinutes, wakeRoutineActive, nightBlockFlagPath
-    global currentDayId, dayStatePath
+    global currentDayId, dayStatePath, workGoalLogPath, skipCroquisToday, trayMenu
 
     ; 睡眠明け＝新しい1日の開始とみなし、日付境界（dayId）を1つ進める。
     ; 作業ノルマ・残業時間の判定はカレンダー日付ではなくこの値を基準にする。
-    currentDayId += 1
-    SafeWriteFile(dayStatePath, currentDayId)
+    ; ただし手動実行時は、本日分がまだノルマ未達成なら進めない（続きとして扱う）
+    shouldAdvanceDay := true
+    if (isManual) {
+        try {
+            _wg := StrSplit(SafeReadFile(workGoalLogPath), "|")
+            if (Integer(_wg[1]) = currentDayId && _wg.Length >= 3 && _wg[3] != "1")
+                shouldAdvanceDay := false
+        }
+    }
+
+    if (shouldAdvanceDay) {
+        currentDayId += 1
+        SafeWriteFile(dayStatePath, currentDayId)
+
+        ; 新しい日になったので「本日のクロッキーをスキップ」設定を自動的にOFFへ戻す
+        if (skipCroquisToday) {
+            skipCroquisToday := false
+            trayMenu.Uncheck("🚫 本日のクロッキーをスキップ")
+        }
+    } else {
+        TrayTip("📅 本日の続き", "本日のノルマがまだ未達成のため、日付を進めずに続行します", "Mute")
+    }
 
     ; 就寝ブロックが実行されていれば起床時に解除
     if FileExist(nightBlockFlagPath) {
@@ -510,7 +563,7 @@ OnManualWakeRoutine(*) {
     }
 
     TrayTip("🔁 スリープ解除ルーティン", delayMinutes "分待機 → クロッキー → 作業 を開始します", "Mute")
-    StartWakeRoutine()
+    StartWakeRoutine(true)
 }
 
 ; ===== 右脳ドローイング：テスト実行（トレイメニュー専用・変更不要）=====
@@ -520,10 +573,25 @@ OnManualWakeRoutine(*) {
 ;    lock_window.ahk をモード6・テストフラグ付きで起動する。
 ;    テスト実行では croquis_used_fast.txt への書き込み（使用済みマーク）を
 ;    行わないため、何度実行しても画像プールは消費されない。
-;    終了は lock_window.ahk 側が単独で完結させるため（作業タイマーへの
-;    引き継ぎは行わない）、ここでは起動するだけで監視は不要。
+;
+;    【要望】実行中はメニュー項目が「🧪 テストモードを終了」に変わり、
+;    押すと fast_croquis_stop.txt を作成してlock_window.ahk側へ手動停止を
+;    知らせる（lock_window.ahk側の各ティック関数がこのファイルを検知して
+;    参照ウィンドウを閉じ正常終了する）。終了を検知したら自動的に
+;    メニュー項目を元の文言に戻す。
+global fastCroquisTestRunning    := false
+global fastCroquisTestSeenActive := false
+fastCroquisStopFlagPath := A_ScriptDir "\fast_croquis_stop.txt"
+
 OnFastCroquisTest(*) {
-    global scriptPath, phaseFile
+    global scriptPath, phaseFile, trayMenu, fastCroquisTestRunning, fastCroquisTestSeenActive, fastCroquisStopFlagPath
+
+    if (fastCroquisTestRunning) {
+        ; 実行中に押された＝手動停止シグナルを送る（グレースフルシャットダウン）
+        SafeWriteFile(fastCroquisStopFlagPath, "1")
+        TrayTip("🧪 テストモード", "終了処理中です…", "Mute")
+        return
+    }
 
     phaseNow := ""
     try phaseNow := Trim(SafeReadFile(phaseFile))
@@ -532,11 +600,38 @@ OnFastCroquisTest(*) {
         return
     }
 
+    SafeDeleteFile(fastCroquisStopFlagPath)   ; 前回分の停止シグナルが残っていないようにする
+
     TrayTip("🧪 右脳ドローイング（テスト）", "60秒 × 25セットのテストを開始します", "Mute")
     ; /croquis:lockSecs:sets:interSecs:mode:test
     ;   60秒 × 25セット、開始前の待機180秒（参照ウィンドウの位置調整用）、
     ;   モード6、テストフラグ=1
     Run('"' scriptPath '" /croquis:60:25:180:6:1')
+
+    fastCroquisTestRunning    := true
+    fastCroquisTestSeenActive := false
+    trayMenu.Rename("🧪 右脳ドローイング（テスト実行）", "🧪 テストモードを終了")
+    SetTimer(WaitForFastCroquisTestEnd, 2000)
+}
+
+; テスト実行の終了を監視し、メニュー項目の文言を自動で元に戻す（変更不要）
+WaitForFastCroquisTestEnd() {
+    global phaseFile, trayMenu, fastCroquisTestRunning, fastCroquisTestSeenActive
+
+    phaseNow := ""
+    try phaseNow := Trim(SafeReadFile(phaseFile))
+
+    ; 起動直後はまだファイルが更新されておらず一瞬 "" のことがあるため、
+    ; 一度でも中身がある状態を確認してから「空に戻った＝終了」と判定する
+    if (phaseNow != "")
+        fastCroquisTestSeenActive := true
+
+    if (fastCroquisTestSeenActive && phaseNow = "") {
+        SetTimer(WaitForFastCroquisTestEnd, 0)
+        fastCroquisTestRunning := false
+        trayMenu.Rename("🧪 テストモードを終了", "🧪 右脳ドローイング（テスト実行）")
+        TrayTip("🧪 テストモード", "終了しました", "Mute")
+    }
 }
 
 ; ===== 無操作時間ベースの起床検知（変更不要）=====
@@ -1112,7 +1207,7 @@ GetScheduledCroquisMode() {
         parts := StrSplit(raw, "|")
         if (parts.Length = 6) {
             n := Integer(parts[A_WDay])
-            if (n >= 1 && n <= 5)
+            if ((n >= 1 && n <= 5) || n = 7)
                 return n
         }
     }
@@ -1120,7 +1215,15 @@ GetScheduledCroquisMode() {
 }
 
 LaunchCroquis() {
-    global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, croquisModeCyclePath, croquisSchedulePath, delayMinutes, countdownEnd, countdownMode
+    global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, croquisModeCyclePath, croquisSchedulePath, delayMinutes, countdownEnd, countdownMode, skipCroquisToday
+
+    ; 【要望】トレイメニューで「本日のクロッキーをスキップ」がONなら、
+    ; モード選択等は一切行わず直接作業タイマーを起動する
+    if (skipCroquisToday) {
+        TrayTip("🚫 クロッキーをスキップ", "作業タイマーを開始します", "Mute")
+        LaunchMain()
+        return
+    }
 
     ; 【要望】週間スケジュール（mode_scheduler.ahk で保存）に今日の曜日の設定があれば、
     ; croquisMode の設定やランダム抽選より優先してそのモードを使う。
@@ -1201,9 +1304,9 @@ LaunchCroquis() {
     params := croquisModeParams.Has(targetMode) ? croquisModeParams[targetMode] : croquisModeParams[1]
     useMode := croquisModeParams.Has(targetMode) ? targetMode : 1
 
-    ; モード5（教本の模写）は画像を一切使わないため、フォルダ確認・画像選択・
-    ; クリップボードコピーをすべてスキップする
-    noImageMode := (useMode = 5)
+    ; モード5・7（教本の模写。タイマー時間が違うだけで挙動は同じ）は画像を
+    ; 一切使わないため、フォルダ確認・画像選択・クリップボードコピーをすべてスキップする
+    noImageMode := (useMode = 5 || useMode = 7)
 
     if (!noImageMode) {
         if (!DirExist(params.folder)) {

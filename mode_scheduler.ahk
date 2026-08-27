@@ -27,25 +27,35 @@ schedulePath := A_ScriptDir "\croquis_schedule.txt"
 weekdays     := ["日", "月", "火", "水", "木", "金"]   ; 土曜日は休みのため対象外
 
 ; モード一覧（croquisModeParams と合わせること。モード6はテスト専用のためここには含めない）
+; modeOptions（表示名）と modeValues（実際のモード番号）は同じ順序・同じ要素数にすること。
+; モード番号は必ずしも「表示順−1」と一致しない（モード6を飛ばしているため）ので、
+; 位置計算ではなくこの対応表を使って変換する。
 modeOptions := [
     "ランダム",
     "モード1（25分×1枚）",
     "モード2（15分×2枚）",
     "モード3（5分×5枚）",
     "モード4（記憶描画）",
-    "モード5（教本模写）"
+    "モード5（教本模写・60分）",
+    "モード7（教本模写・30分）"
 ]
+modeValues := [0, 1, 2, 3, 4, 5, 7]
 
 ; ===== 既存のスケジュールを読み込む（無ければ全曜日ランダム=0）=====
-saved := [0, 0, 0, 0, 0, 0]
+; saved には「DDLの選択インデックス（1始まり）」を入れる（モード番号そのものではない）
+saved := [1, 1, 1, 1, 1, 1]   ; 1 = "ランダム"
 try {
     raw := Trim(FileRead(schedulePath))
     parts := StrSplit(raw, "|")
     if (parts.Length = 6) {
         for i, v in parts {
             n := Integer(v)
-            if (n >= 0 && n <= 5)
-                saved[i] := n
+            for idx, mv in modeValues {
+                if (mv = n) {
+                    saved[i] := idx
+                    break
+                }
+            }
         }
     }
 }
@@ -64,7 +74,7 @@ ddls := []
 loop 6 {
     i := A_Index
     myGui.Add("Text", "w50 y+14 Section", weekdays[i] "曜日")
-    ddl := myGui.Add("DropDownList", "x+10 w240 Choose" (saved[i] + 1), modeOptions)
+    ddl := myGui.Add("DropDownList", "x+10 w240 Choose" saved[i], modeOptions)
     ddls.Push(ddl)
 }
 
@@ -82,11 +92,11 @@ myGui.OnEvent("Close", (*) => ExitApp())
 myGui.Show()
 
 OnSave(*) {
-    global ddls, schedulePath, statusText
+    global ddls, schedulePath, statusText, modeValues
 
     values := []
     for ddl in ddls
-        values.Push(ddl.Value - 1)   ; DDLのValue（1始まり）→ モード番号（0=ランダム, 1〜5）に変換
+        values.Push(modeValues[ddl.Value])   ; DDLのValue（1始まりのindex）→ 対応表で実際のモード番号に変換
 
     line := ""
     for i, v in values

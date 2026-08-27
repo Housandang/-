@@ -301,6 +301,10 @@ croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
 ;    fastCroquisRefX/Y/W/H
 ;      → 参照ウィンドウの初期位置・サイズ（起動後、ウィンドウ自体を
 ;        ドラッグ・リサイズして調整可能。ここの値は初期値のみ）
+;
+;    fastCroquisStopFlagPath
+;      → launcher.ahk側のトレイメニュー「🧪 テストモードを終了」から
+;        手動停止する際に使うシグナルファイル（変更不要）
 ; ================================================================
 fastCroquisCaptureEvery := 5
 fastCroquisFolder       := A_ScriptDir "\croquis_models_2"
@@ -309,6 +313,7 @@ fastCroquisRefX := 100
 fastCroquisRefY := 100
 fastCroquisRefW := 400
 fastCroquisRefH := 400
+fastCroquisStopFlagPath := A_ScriptDir "\fast_croquis_stop.txt"
 
 ; ================================================================
 ; ★ 中休みモードの設定
@@ -503,7 +508,8 @@ focusModeAllowList := [
     "カラーヒストリー",
     "情報",
     "ナビゲーター",
-    "ホウ酸's"
+    "ホウ酸's",
+    "kindle"   ; Chromeのウィンドウ名機能で「kindle」と名付けたウィンドウを除外
 ]
 
 ; ================================================================
@@ -714,6 +720,9 @@ global g := {
     idleSavedTitle:       "",     ; 一時停止前のタイトル（復元用）
     idleSavedSub:         "",     ; 一時停止前のサブテキスト（復元用）
     inCaptureWait:        false,  ; クロッキー撮影待機中かどうか（無操作検知の一時停止から除外するため）
+    mealSavedTitle:       "",     ; 食事休憩前のタイトル（復元用）
+    mealSavedSub:         "",     ; 食事休憩前のサブテキスト（復元用）
+    mealSavedColor:       "",     ; 食事休憩前の背景色（復元用）
     goingOut:             false,  ; 外出モード（無期限の手動一時停止）中かどうか
     goOutSavedTitle:      "",     ; 外出モード開始前のタイトル（復元用）
     goOutSavedSub:        "",     ; 外出モード開始前のサブテキスト（復元用）
@@ -1354,11 +1363,16 @@ CheckActiveWork() {
 SetTimer(CheckIdleTimerPause, 200)
 
 CheckIdleTimerPause() {
-    global g, timerTitle, timerSub, workIdleToleranceSecs
+    global g, timerTitle, timerSub, workIdleToleranceSecs, isCroquis, croquisArg
 
     ; ロック中のみが対象（休憩・中休みは対象外。中休みは無操作でも
     ; タイマーが進み続けることが「自動でセット追加」の前提になっているため）
     if (g.phase != "lock")
+        return
+
+    ; 【要望】教本模写モード（モード5・7）は、教本の文章を読んでいるために
+    ; 無操作になっているだけでサボっているわけではないため、対象外にする
+    if (isCroquis && (croquisArg.mode = 5 || croquisArg.mode = 7))
         return
 
     ; クロッキーの撮影待機中も対象外にする。
@@ -1510,17 +1524,18 @@ CheckGameLimit() {
 SetTimer(CheckMealPause, 15000)
 
 CheckMealPause() {
-    global g, timerGui, timerTitle, timerCount, timerSub, mealEndBtn, isCroquis
+    global g, timerGui, timerTitle, timerCount, timerSub, mealEndBtn
     global mealPauseStartH, mealPauseStartM, mealPauseEndH, mealPauseEndM
 
     if (g.phase = "")
         return
 
-    ; クロッキー中は食事休憩による割り込みを行わない。
-    ; （タイマー終了間際に食事休憩が割り込むと g.isPaused が true のままになり、
-    ;   撮影フェーズへ移行できなくなる問題があったため。クロッキーは短時間なので
-    ;   食事時間帯に多少かかっても中断せず最後まで進行させる）
-    if (isCroquis)
+    ; 撮影処理中（スクリーンショット撮影〜フェーズ切り替え完了まで）は見送る。
+    ; この間に食事休憩を割り込ませると、撮影自体は続行される一方で表示だけ
+    ; 食事休憩に切り替わり、撮影完了後の次フェーズ表示で上書きされてしまう
+    ; （無操作一時停止と同じ理由で対象外にしている）。次のチェック（最大15秒後）
+    ; で改めて判定される。
+    if (g.inCaptureWait)
         return
 
     h := Integer(FormatTime(, "H"))
@@ -1535,6 +1550,14 @@ CheckMealPause() {
 
         if (g.isExercise)
             return
+
+        ; 現在の表示内容をそのまま保存しておく（g.phase から再構築するのではなく、
+        ; そのまま復元できるようにする）。通常のロック・休憩に限らず、クロッキーの
+        ; どのフェーズ（セット中・撮影待機後の次セット案内・休憩など）で食事休憩が
+        ; 挟まっても、終了後に正しい表示へ戻せる。
+        g.mealSavedTitle := timerTitle.Value
+        g.mealSavedSub   := timerSub.Value
+        g.mealSavedColor := timerGui.BackColor
 
         g.isPaused          := true
         g.idlePaused        := false   ; 無操作検知による一時停止ではないことを明示
@@ -1575,15 +1598,12 @@ EndMealPauseResume() {
 
     WritePhase(g.phase)   ; サボり検知を元のフェーズに戻す
 
-    if (g.phase = "lock") {
-        timerGui.BackColor := "CC3333"
-        timerTitle.Value   := "🔒 Lock  -  Set " g.currentSet "/" g.totalSets
-        timerSub.Value     := "remaining time"
-    } else {
-        timerGui.BackColor := "2E7D32"
-        timerTitle.Value   := "☕ Break  -  Set " g.currentSet "/" g.totalSets
-        timerSub.Value     := "enjoy your break!"
-    }
+    ; 食事休憩前に保存しておいた表示内容をそのまま復元する
+    ; （通常のロック・休憩に限らず、クロッキーのどのフェーズでも正しく戻せる）
+    timerGui.BackColor := g.mealSavedColor
+    timerTitle.Value   := g.mealSavedTitle
+    timerSub.Value     := g.mealSavedSub
+
     if (g.phase = "lock")
         NextDnsBlock()
     SoundPlay("*48")
@@ -2071,8 +2091,8 @@ RunPomodoroCroquis(targetTitles, lockSecs, totalSets, interSecs) {
 StartCroquisFirstWait(totalSets, interSecs) {
     global g, timerGui, timerTitle, timerCount, timerSub, croquisArg
 
-    ; モード5（教本の模写）は画像を一切使わないため、貼り付けの案内は出さない
-    noImageMode := (croquisArg.mode = 5)
+    ; モード5・7（教本の模写）は画像を一切使わないため、貼り付けの案内は出さない
+    noImageMode := (croquisArg.mode = 5 || croquisArg.mode = 7)
 
     g.generation += 1
     myGen        := g.generation
@@ -2377,31 +2397,95 @@ PickFastCroquisImage() {
 ; クリップボード貼り付けの代わりに、常時最前面の小さな専用ウィンドウに
 ; モデル画像を直接表示する。60秒ごとにプログラム側で自動的に中身が
 ; 切り替わるため、コピー・貼り付けの手作業が一切不要になる。
+;
+; 画像は「ウィンドウの現在のクライアント領域に収まる最大サイズ」まで
+; アスペクト比を保ったまま拡大縮小する（歪み・引き伸ばしを防ぐため、
+; 固定のw/hを強制しない。はみ出す余白はウィンドウの背景色＝黒のまま）。
+; ウィンドウをドラッグでリサイズした際も Size イベントで再計算するため、
+; どのサイズにしてもガビガビ・歪みが出ない。
 global fastRefGui := ""
+global fastRefCurrentImage := ""
 
 CreateFastCroquisRefWindow(firstImagePath) {
-    global fastRefGui, fastCroquisRefX, fastCroquisRefY, fastCroquisRefW, fastCroquisRefH
+    global fastRefGui, fastCroquisRefX, fastCroquisRefY, fastCroquisRefW, fastCroquisRefH, fastRefCurrentImage
 
     fastRefGui := Gui("+AlwaysOnTop +Resize", "参照 - 右脳ドローイング")
     fastRefGui.MarginX := 0
     fastRefGui.MarginY := 0
     fastRefGui.BackColor := "000000"
-    fastRefGui.Add("Picture", "x0 y0 w" fastCroquisRefW " h" fastCroquisRefH " vRefPic",
-        firstImagePath != "" ? firstImagePath : "")
+    fastRefGui.Add("Picture", "x0 y0 w" fastCroquisRefW " h" fastCroquisRefH " vRefPic", "")
+    fastRefGui.OnEvent("Size", FastRefWindowResized)
     fastRefGui.Show("x" fastCroquisRefX " y" fastCroquisRefY " w" fastCroquisRefW " h" fastCroquisRefH)
+
+    fastRefCurrentImage := ""
+    ShowFastCroquisImage(firstImagePath)
 }
 
 ShowFastCroquisImage(path) {
-    global fastRefGui
+    global fastRefCurrentImage
     if (path = "")
         return
-    try fastRefGui["RefPic"].Value := path
+    fastRefCurrentImage := path
+    FitFastCroquisImageToWindow()
+}
+
+FastRefWindowResized(GuiObj, MinMax, Width, Height) {
+    if (MinMax = -1)   ; 最小化時は何もしない
+        return
+    FitFastCroquisImageToWindow()
+}
+
+; 現在の画像を、現在のウィンドウサイズに合わせてアスペクト比を保ったまま
+; 再配置する（画像切り替え時・ウィンドウリサイズ時の両方から呼ばれる）
+FitFastCroquisImageToWindow() {
+    global fastRefGui, fastRefCurrentImage
+    if (fastRefCurrentImage = "" || fastRefGui = "")
+        return
+
+    try {
+        pic := fastRefGui["RefPic"]
+        pic.Value := fastRefCurrentImage
+
+        fastRefGui.GetClientPos(, , &winW, &winH)
+        if (winW <= 0 || winH <= 0)
+            return
+
+        ; まず幅いっぱいに合わせ、高さを画像本来の縦横比から自動計算させる
+        pic.Move(0, 0, winW, -1)
+        pic.GetPos(, , &w, &h)
+
+        ; それでもウィンドウの高さをはみ出す場合は、高さ基準で幅を自動計算し直す
+        if (h > winH) {
+            pic.Move(0, 0, -1, winH)
+            pic.GetPos(, , &w, &h)
+        }
+
+        ; 余白ができる分は中央寄せにする
+        offX := Round((winW - w) / 2)
+        offY := Round((winH - h) / 2)
+        pic.Move(offX, offY, w, h)
+    }
 }
 
 DestroyFastCroquisRefWindow() {
-    global fastRefGui
+    global fastRefGui, fastRefCurrentImage
     try fastRefGui.Destroy()
     fastRefGui := ""
+    fastRefCurrentImage := ""
+}
+
+; 手動停止シグナル（launcher.ahk トレイメニュー「🧪 テストモードを終了」）を確認する。
+; 各ティック関数の先頭で呼び出し、シグナルファイルがあれば参照ウィンドウを閉じて
+; 正常終了する（current_phase.txt は CleanupPhaseFile が空に戻してくれる）。
+CheckFastCroquisStop() {
+    global fastCroquisStopFlagPath
+    if FileExist(fastCroquisStopFlagPath) {
+        SafeDeleteFile(fastCroquisStopFlagPath)
+        DestroyFastCroquisRefWindow()
+        SoundPlay("*48")
+        TrayTip("🧪 テストモード", "手動で終了しました", "Mute")
+        ExitApp()
+    }
 }
 
 ; ===== 右脳ドローイング：メインフロー（モード6専用・変更不要）=====
@@ -2438,6 +2522,7 @@ RunFastCroquis(totalSets, lockSecs, preWaitSecs) {
             SetTimer(FastPreWaitTick, 0)
             return
         }
+        CheckFastCroquisStop()
         if (g.isPaused)
             return
 
@@ -2481,6 +2566,7 @@ StartFastCroquisSet(setNum, totalSets, lockSecs) {
             SetTimer(FastCroquisLockTick, 0)
             return
         }
+        CheckFastCroquisStop()
         if (g.isPaused)
             return
 
@@ -2535,6 +2621,7 @@ StartFastCroquisCapture(setNum, totalSets, lockSecs) {
             SetTimer(FastCaptureCountdownTick, 0)
             return
         }
+        CheckFastCroquisStop()
 
         rem := captureEnd - A_TickCount
         if (rem <= 0) {
