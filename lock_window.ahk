@@ -315,6 +315,13 @@ fastCroquisRefW := 400
 fastCroquisRefH := 400
 fastCroquisStopFlagPath := A_ScriptDir "\fast_croquis_stop.txt"
 
+; 参照ウィンドウの状態を保持するグローバル変数。
+; オート実行の早い段階（起動モード分岐で RunFastCroquis() が呼ばれるより前）で
+; 初期化しておく必要がある（AHKはオート実行部分を上から順に実行するため、
+; 分岐処理より後ろで初期化すると「値が代入されていない」エラーになる）。
+global fastRefGui := ""
+global fastRefCurrentImage := ""
+
 ; ================================================================
 ; ★ 中休みモードの設定
 ;
@@ -2403,8 +2410,6 @@ PickFastCroquisImage() {
 ; 固定のw/hを強制しない。はみ出す余白はウィンドウの背景色＝黒のまま）。
 ; ウィンドウをドラッグでリサイズした際も Size イベントで再計算するため、
 ; どのサイズにしてもガビガビ・歪みが出ない。
-global fastRefGui := ""
-global fastRefCurrentImage := ""
 
 CreateFastCroquisRefWindow(firstImagePath) {
     global fastRefGui, fastCroquisRefX, fastCroquisRefY, fastCroquisRefW, fastCroquisRefH, fastRefCurrentImage
@@ -2413,7 +2418,6 @@ CreateFastCroquisRefWindow(firstImagePath) {
     fastRefGui.MarginX := 0
     fastRefGui.MarginY := 0
     fastRefGui.BackColor := "000000"
-    fastRefGui.Add("Picture", "x0 y0 w" fastCroquisRefW " h" fastCroquisRefH " vRefPic", "")
     fastRefGui.OnEvent("Size", FastRefWindowResized)
     fastRefGui.Show("x" fastCroquisRefX " y" fastCroquisRefY " w" fastCroquisRefW " h" fastCroquisRefH)
 
@@ -2436,34 +2440,42 @@ FastRefWindowResized(GuiObj, MinMax, Width, Height) {
 }
 
 ; 現在の画像を、現在のウィンドウサイズに合わせてアスペクト比を保ったまま
-; 再配置する（画像切り替え時・ウィンドウリサイズ時の両方から呼ばれる）
+; 再配置する（画像切り替え時・ウィンドウリサイズ時の両方から呼ばれる）。
+; Move()に-1を渡す方式は挙動が不確実だったため、いったん「w-1 h-1」
+; （画像本来のピクセルサイズ）の非表示コントロールを追加してサイズを取得し、
+; そこから自分で拡大率を計算する確実な方法に変更した。
 FitFastCroquisImageToWindow() {
     global fastRefGui, fastRefCurrentImage
     if (fastRefCurrentImage = "" || fastRefGui = "")
         return
 
     try {
-        pic := fastRefGui["RefPic"]
-        pic.Value := fastRefCurrentImage
-
         fastRefGui.GetClientPos(, , &winW, &winH)
         if (winW <= 0 || winH <= 0)
             return
 
-        ; まず幅いっぱいに合わせ、高さを画像本来の縦横比から自動計算させる
-        pic.Move(0, 0, winW, -1)
-        pic.GetPos(, , &w, &h)
+        ; 本来のピクセルサイズを調べるための非表示プローブ
+        probe := fastRefGui.Add("Picture", "x0 y0 w-1 h-1 Hidden", fastRefCurrentImage)
+        probe.GetPos(, , &natW, &natH)
+        probe.Destroy()
 
-        ; それでもウィンドウの高さをはみ出す場合は、高さ基準で幅を自動計算し直す
-        if (h > winH) {
-            pic.Move(0, 0, -1, winH)
-            pic.GetPos(, , &w, &h)
+        if (natW <= 0 || natH <= 0) {
+            natW := winW
+            natH := winH
         }
 
-        ; 余白ができる分は中央寄せにする
-        offX := Round((winW - w) / 2)
-        offY := Round((winH - h) / 2)
-        pic.Move(offX, offY, w, h)
+        scale := Min(winW / natW, winH / natH)
+        dispW := Max(1, Round(natW * scale))
+        dispH := Max(1, Round(natH * scale))
+        offX  := Round((winW - dispW) / 2)
+        offY  := Round((winH - dispH) / 2)
+
+        ; 表示用コントロールは毎回作り直す（サイズがぴったり合った状態で
+        ; 作成できるので、引き伸ばしによる劣化・歪みが出ない）
+        try fastRefGui["RefPic"].Destroy()
+        fastRefGui.Add("Picture", "x" offX " y" offY " w" dispW " h" dispH " vRefPic", fastRefCurrentImage)
+    } catch as e {
+        TrayTip("⚠️ 参照ウィンドウ", "画像の表示に失敗しました: " e.Message, "Mute")
     }
 }
 
