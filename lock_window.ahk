@@ -321,6 +321,8 @@ fastCroquisStopFlagPath := A_ScriptDir "\fast_croquis_stop.txt"
 ; 分岐処理より後ろで初期化すると「値が代入されていない」エラーになる）。
 global fastRefGui := ""
 global fastRefCurrentImage := ""
+global fastCroquisLastError := ""
+fastCroquisErrorLogPath := A_ScriptDir "\fast_croquis_error.log"
 
 ; ================================================================
 ; ★ 中休みモードの設定
@@ -2353,7 +2355,10 @@ StartCroquisInterSet(doneSet, totalSets, lockSecs, interSecs) {
 PickFastCroquisImage() {
     global croquisArg, croquisUsedFastLog, fastCroquisFolder
 
-    exts    := ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]
+    ; ※参照ウィンドウはAHK標準のPictureコントロールで表示するため、
+    ;   webpは読み込めないことが多く対象外にしている（クリップボード経由の
+    ;   他モードでは問題なくても、こちらでは "Can't create control" になる）
+    exts    := ["*.jpg", "*.jpeg", "*.png", "*.bmp"]
     allImgs := []
     for ext in exts {
         loop files fastCroquisFolder "\" ext
@@ -2426,11 +2431,35 @@ CreateFastCroquisRefWindow(firstImagePath) {
 }
 
 ShowFastCroquisImage(path) {
-    global fastRefCurrentImage
+    global fastRefCurrentImage, fastCroquisLastError, fastCroquisErrorLogPath
     if (path = "")
         return
     fastRefCurrentImage := path
-    FitFastCroquisImageToWindow()
+    if (FitFastCroquisImageToWindow())
+        return
+
+    ; この画像の表示に失敗した場合（読み込めない形式など）、
+    ; 別の画像を選び直して最大3回までリトライする。各失敗はログファイルに
+    ; 追記する（TrayTipはコピペできず一定時間で消えて確認しづらいため使わない）。
+    loop 3 {
+        LogFastCroquisError(fastRefCurrentImage, fastCroquisLastError)
+        altPath := PickFastCroquisImage()
+        if (altPath = "")
+            break
+        fastRefCurrentImage := altPath
+        if (FitFastCroquisImageToWindow())
+            return
+    }
+    LogFastCroquisError(fastRefCurrentImage, fastCroquisLastError)
+}
+
+; 右脳ドローイングの画像表示エラーをログファイルに追記する（変更不要）。
+; TrayTipはコピペできず一定時間で消えるため使わず、常に確認・コピペできる
+; プレーンテキストファイルに記録する。
+LogFastCroquisError(path, errMsg) {
+    global fastCroquisErrorLogPath
+    line := FormatTime(, "yyyy-MM-dd HH:mm:ss") " | " path " | " errMsg "`n"
+    try FileAppend(line, fastCroquisErrorLogPath)
 }
 
 FastRefWindowResized(GuiObj, MinMax, Width, Height) {
@@ -2444,15 +2473,18 @@ FastRefWindowResized(GuiObj, MinMax, Width, Height) {
 ; Move()に-1を渡す方式は挙動が不確実だったため、いったん「w-1 h-1」
 ; （画像本来のピクセルサイズ）の非表示コントロールを追加してサイズを取得し、
 ; そこから自分で拡大率を計算する確実な方法に変更した。
+; 戻り値: 表示に成功したら true、失敗したら false（呼び出し側でリトライに使う）
 FitFastCroquisImageToWindow() {
-    global fastRefGui, fastRefCurrentImage
+    global fastRefGui, fastRefCurrentImage, fastCroquisLastError
     if (fastRefCurrentImage = "" || fastRefGui = "")
-        return
+        return false
 
     try {
         fastRefGui.GetClientPos(, , &winW, &winH)
-        if (winW <= 0 || winH <= 0)
-            return
+        if (winW <= 0 || winH <= 0) {
+            fastCroquisLastError := "ウィンドウサイズの取得に失敗（" winW "x" winH "）"
+            return false
+        }
 
         ; 本来のピクセルサイズを調べるための非表示プローブ
         probe := fastRefGui.Add("Picture", "x0 y0 w-1 h-1 Hidden", fastRefCurrentImage)
@@ -2474,8 +2506,10 @@ FitFastCroquisImageToWindow() {
         ; 作成できるので、引き伸ばしによる劣化・歪みが出ない）
         try fastRefGui["RefPic"].Destroy()
         fastRefGui.Add("Picture", "x" offX " y" offY " w" dispW " h" dispH " vRefPic", fastRefCurrentImage)
+        return true
     } catch as e {
-        TrayTip("⚠️ 参照ウィンドウ", "画像の表示に失敗しました: " e.Message, "Mute")
+        fastCroquisLastError := e.Message " (" (e.HasProp("What") ? e.What : "") ")"
+        return false
     }
 }
 
