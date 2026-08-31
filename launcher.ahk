@@ -172,11 +172,21 @@ workGoalLogPath := A_ScriptDir "\work_goal.txt"
 ;            1セット目のモデルを記憶を頼りに描く練習用）
 ;        5 … 60分 × 1枚相当だが画像を使わない教本模写用（開始前に5分の準備時間）
 ;        7 … モード5と同じ（画像不要の教本模写）だがタイマーが30分の短縮版
-;        0 … ランダムモード（起動のたびに1〜5・7のいずれかをランダムに選択）（デフォルト）
+;        8 … 1分×10枚の右脳ドローイング（軽め）。参照ウィンドウ（HTML/ActiveX表示）を
+;            使い、毎セットの後に20秒の休憩＋次画像の位置調整時間を挟む（撮影は無し）。
+;            【重要】このモードは croquisMode の数値やランダム抽選では絶対に選ばれない
+;            （LaunchCroquis()内で明示的に除外している）。選ばれるのは
+;            (a) mode_scheduler.ahk で曜日ごとに直接指定した場合
+;            (b) トレイメニュー「本日のクロッキーをスキップ」がONの場合
+;                （通常のクロッキーを完全に無くすのではなく、この軽量版で代替する）
+;            のいずれかのみ。croquis_models_2フォルダをモード2・4・6と共有する
+;        0 … ランダムモード（起動のたびに1〜5・7のいずれかをランダムに選択。
+;            モード8は上記の通りランダム候補から常に除外される）（デフォルト）
 ;
 ;    croquisRandomExcludeModes
 ;      → ランダムモード（croquisMode = 0）のとき、選択肢から除外したいモード番号を
 ;        配列で指定します。例: [4] ならモード4は絶対に選ばれません
+;        （モード8は常に除外されるため、ここに書く必要はありません）
 ;
 ;    croquisModeParams の folder
 ;      → モードごとのモデル画像フォルダのパス。
@@ -220,7 +230,15 @@ croquisModeParams := Map(
     ; interSecs（5分）は開始前に教本を開く準備時間として使う。
     5, {lockSecs: 3600, sets: 1, interSecs: 300, folder: ""},
     ; モード7：モード5と全く同じ（教本の模写・画像不要）だが、タイマーが30分の短縮版。
-    7, {lockSecs: 1800, sets: 1, interSecs: 300, folder: ""}
+    7, {lockSecs: 1800, sets: 1, interSecs: 300, folder: ""},
+    ; モード8：1分×10枚の右脳ドローイング（軽め）。参照ウィンドウ（HTML/ActiveX表示）を
+    ; 使うモード6（テスト専用）と表示の仕組みは同じだが、こちらは本番用の実モードで、
+    ; croquisModeParamsに登録されている。folderはモード2・4・6と共用のcroquis_models_2。
+    ; interSecs（20秒）はセット間の休憩＋次画像の位置調整時間として、毎セットの後に
+    ; 必ず挟まれる（モード6テストのような「数セットごとに撮影」という仕組みは無い）。
+    ; 【重要】ランダム抽選・croquisModeの数値指定では絶対に選ばれない
+    ; （LaunchCroquis()内で明示的に除外している）。詳細は上部のコメント参照。
+    8, {lockSecs: 60, sets: 10, interSecs: 20, folder: A_ScriptDir "\croquis_models_2"}
 )
 
 ; ================================================================
@@ -316,13 +334,14 @@ trayMenu.Add("🌙 就寝モードをキャンセル", OnNightModeCancel)
 trayMenu.Add()
 trayMenu.Add("🔁 スリープ解除ルーティンを手動実行 (" delayMinutes "分待機→クロッキー→作業)", OnManualWakeRoutine)
 trayMenu.Add("🧪 右脳ドローイング（テスト実行）", OnFastCroquisTest)
-trayMenu.Add("🚫 本日のクロッキーをスキップ", OnToggleSkipCroquis)
+trayMenu.Add("🚫 本日のクロッキーをスキップ（代わりに軽量版を実行）", OnToggleSkipCroquis)
 
 ; ===== 本日のクロッキーをスキップ（変更不要）=====
 ; トレイメニューでいつでもON/OFFを切り替えられる。ONの間は LaunchCroquis() が
-; 呼ばれても通常のクロッキー処理を全部飛ばし、直接作業タイマーを起動する
-; （手動実行のスリープ解除ルーティンにも効く。右脳ドローイングのテスト実行は
-;   独立した別の仕組みなので影響を受けない）。
+; 呼ばれると、通常のクロッキーの代わりにモード8（1分×10枚の軽量な右脳
+; ドローイング）を実行する（全く練習しないのは良くないため、完全スキップでは
+; なく軽量版で代替する仕様。手動実行のスリープ解除ルーティンにも効く。
+; 右脳ドローイングのテスト実行＝モード6は独立した別の仕組みなので影響を受けない）。
 ; dayId が変わったタイミングで自動的にOFFへ戻す（StartWakeRoutine() 内）。
 global skipCroquisToday := false
 
@@ -330,11 +349,11 @@ OnToggleSkipCroquis(*) {
     global skipCroquisToday, trayMenu
     skipCroquisToday := !skipCroquisToday
     if (skipCroquisToday)
-        trayMenu.Check("🚫 本日のクロッキーをスキップ")
+        trayMenu.Check("🚫 本日のクロッキーをスキップ（代わりに軽量版を実行）")
     else
-        trayMenu.Uncheck("🚫 本日のクロッキーをスキップ")
+        trayMenu.Uncheck("🚫 本日のクロッキーをスキップ（代わりに軽量版を実行）")
     if (skipCroquisToday)
-        TrayTip("🚫 クロッキーをスキップ", "本日はクロッキーを実行せず、直接作業を開始します", "Mute")
+        TrayTip("🚫 クロッキーをスキップ", "本日は通常のクロッキーの代わりに、軽い右脳ドローイング（1分×10枚）を行います", "Mute")
     else
         TrayTip("✅ スキップ解除", "本日もいつも通りクロッキーを実行します", "Mute")
 }
@@ -518,7 +537,7 @@ StartWakeRoutine(isManual := false) {
         ; 新しい日になったので「本日のクロッキーをスキップ」設定を自動的にOFFへ戻す
         if (skipCroquisToday) {
             skipCroquisToday := false
-            trayMenu.Uncheck("🚫 本日のクロッキーをスキップ")
+            trayMenu.Uncheck("🚫 本日のクロッキーをスキップ（代わりに軽量版を実行）")
         }
     } else {
         TrayTip("📅 本日の続き", "本日のノルマがまだ未達成のため、日付を進めずに続行します", "Mute")
@@ -1207,7 +1226,7 @@ GetScheduledCroquisMode() {
         parts := StrSplit(raw, "|")
         if (parts.Length = 6) {
             n := Integer(parts[A_WDay])
-            if ((n >= 1 && n <= 5) || n = 7)
+            if ((n >= 1 && n <= 5) || n = 7 || n = 8)
                 return n
         }
     }
@@ -1217,87 +1236,99 @@ GetScheduledCroquisMode() {
 LaunchCroquis() {
     global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, croquisModeCyclePath, croquisSchedulePath, delayMinutes, countdownEnd, countdownMode, skipCroquisToday
 
-    ; 【要望】トレイメニューで「本日のクロッキーをスキップ」がONなら、
-    ; モード選択等は一切行わず直接作業タイマーを起動する
+    ; 【要望】トレイメニューで「本日のクロッキーをスキップ」がONの場合、
+    ; 通常のクロッキーを完全に無くすのではなく、代わりにモード8（1分×10枚の
+    ; 軽量な右脳ドローイング）を実行する。全く練習しないのは良くないため、
+    ; 通常のクロッキーに代わる小規模な練習モードという位置づけ。
+    ; （croquisMode の設定やスケジュール・ランダム抽選より優先する）
     if (skipCroquisToday) {
-        TrayTip("🚫 クロッキーをスキップ", "作業タイマーを開始します", "Mute")
-        LaunchMain()
-        return
-    }
-
-    ; 【要望】週間スケジュール（mode_scheduler.ahk で保存）に今日の曜日の設定があれば、
-    ; croquisMode の設定やランダム抽選より優先してそのモードを使う。
-    ; スケジュール側で「ランダム」に設定されている曜日、またはスケジュール自体が
-    ; 無い・壊れている場合は 0 が返るので、これまでどおりの分岐にフォールバックする。
-    targetMode := croquisMode
-    scheduledMode := GetScheduledCroquisMode()
-    if (scheduledMode > 0) {
-        targetMode := scheduledMode
-        TrayTip("📅 スケジュール", "本日はモード" targetMode "です（週間スケジュール設定済み）", "Mute")
-    } else if (croquisMode = 0) {
-        ; ランダムモード（croquisMode = 0）：既存モードの中から毎回ランダムに1つ選ぶ
-        ; ※ croquisMode 自体（設定値）は書き換えない。今回の起動用に一時的に決めるだけ
-        ; 全モードを一周するまでは被りなしで選び、一周したらまた全モードから選び直す
-        availableModes := []
-        for k, v in croquisModeParams {
-            excluded := false
-            for ex in croquisRandomExcludeModes {
-                if (ex = k) {
-                    excluded := true
-                    break
+        targetMode := 8
+        TrayTip("🚫 通常クロッキーをスキップ", "代わりに軽い右脳ドローイング（1分×10枚）を行います", "Mute")
+    } else {
+        ; 【要望】週間スケジュール（mode_scheduler.ahk で保存）に今日の曜日の設定があれば、
+        ; croquisMode の設定やランダム抽選より優先してそのモードを使う。
+        ; スケジュール側で「ランダム」に設定されている曜日、またはスケジュール自体が
+        ; 無い・壊れている場合は 0 が返るので、これまでどおりの分岐にフォールバックする。
+        targetMode := croquisMode
+        scheduledMode := GetScheduledCroquisMode()
+        if (scheduledMode > 0) {
+            targetMode := scheduledMode
+            TrayTip("📅 スケジュール", "本日はモード" targetMode "です（週間スケジュール設定済み）", "Mute")
+        } else if (croquisMode = 0) {
+            ; ランダムモード（croquisMode = 0）：既存モードの中から毎回ランダムに1つ選ぶ
+            ; ※ croquisMode 自体（設定値）は書き換えない。今回の起動用に一時的に決めるだけ
+            ; 全モードを一周するまでは被りなしで選び、一周したらまた全モードから選び直す
+            ;
+            ; 【重要】モード8（軽量練習モード）は croquisRandomExcludeModes の設定に
+            ; 関わらず、常にランダム候補から除外する（ユーザーが誤って除外リストから
+            ; 外してしまっても選ばれないようにするための、コード上のハード制約）。
+            ; モード8は (a) mode_scheduler.ahk での明示指定 (b) スキップ時の代替、
+            ; の2経路でのみ選ばれる仕様のため。
+            availableModes := []
+            for k, v in croquisModeParams {
+                if (k = 8)
+                    continue
+                excluded := false
+                for ex in croquisRandomExcludeModes {
+                    if (ex = k) {
+                        excluded := true
+                        break
+                    }
                 }
+                if (!excluded)
+                    availableModes.Push(k)
             }
-            if (!excluded)
-                availableModes.Push(k)
-        }
-        if (availableModes.Length = 0) {
-            ; 除外しすぎて選べるモードが無い場合は、除外を無視して全モードから選ぶ
-            for k, v in croquisModeParams
-                availableModes.Push(k)
-        }
-
-        ; このサイクルで既に選ばれたモードを読み込む
-        usedModes := []
-        raw := Trim(SafeReadFile(croquisModeCyclePath))
-        if (raw != "") {
-            for part in StrSplit(raw, ",") {
-                try usedModes.Push(Integer(part))
+            if (availableModes.Length = 0) {
+                ; 除外しすぎて選べるモードが無い場合は、除外を無視して全モードから選ぶ
+                ; （ただしモード8だけは、この救済ケースでも対象外のまま）
+                for k, v in croquisModeParams
+                    if (k != 8)
+                        availableModes.Push(k)
             }
-        }
 
-        ; 候補から「このサイクルでまだ選ばれていないモード」だけを残す
-        ; （croquisRandomExcludeModes が前回起動時と変わっていても、単純に
-        ;   availableModes と usedModes の差分を取るだけなので自然に整合する）
-        remainingModes := []
-        for m in availableModes {
-            isUsed := false
-            for u in usedModes {
-                if (u = m) {
-                    isUsed := true
-                    break
-                }
-            }
-            if (!isUsed)
-                remainingModes.Push(m)
-        }
-
-        ; 候補が尽きた（1周した）場合は、そこでリセットして全候補から選び直す
-        cycleReset := (remainingModes.Length = 0)
-        if (cycleReset) {
-            remainingModes := availableModes.Clone()
+            ; このサイクルで既に選ばれたモードを読み込む
             usedModes := []
+            raw := Trim(SafeReadFile(croquisModeCyclePath))
+            if (raw != "") {
+                for part in StrSplit(raw, ",") {
+                    try usedModes.Push(Integer(part))
+                }
+            }
+
+            ; 候補から「このサイクルでまだ選ばれていないモード」だけを残す
+            ; （croquisRandomExcludeModes が前回起動時と変わっていても、単純に
+            ;   availableModes と usedModes の差分を取るだけなので自然に整合する）
+            remainingModes := []
+            for m in availableModes {
+                isUsed := false
+                for u in usedModes {
+                    if (u = m) {
+                        isUsed := true
+                        break
+                    }
+                }
+                if (!isUsed)
+                    remainingModes.Push(m)
+            }
+
+            ; 候補が尽きた（1周した）場合は、そこでリセットして全候補から選び直す
+            cycleReset := (remainingModes.Length = 0)
+            if (cycleReset) {
+                remainingModes := availableModes.Clone()
+                usedModes := []
+            }
+
+            targetMode := remainingModes[Random(1, remainingModes.Length)]
+            usedModes.Push(targetMode)
+
+            usedStr := ""
+            for i, m in usedModes
+                usedStr .= (i = 1 ? "" : ",") m
+            SafeWriteFile(croquisModeCyclePath, usedStr)
+
+            cycleNote := cycleReset ? "（新しい周を開始）" : "（残り" (remainingModes.Length - 1) "モード）"
+            TrayTip("🎲 ランダムモード", "今回はモード" targetMode "が選ばれました " cycleNote, "Mute")
         }
-
-        targetMode := remainingModes[Random(1, remainingModes.Length)]
-        usedModes.Push(targetMode)
-
-        usedStr := ""
-        for i, m in usedModes
-            usedStr .= (i = 1 ? "" : ",") m
-        SafeWriteFile(croquisModeCyclePath, usedStr)
-
-        cycleNote := cycleReset ? "（新しい周を開始）" : "（残り" (remainingModes.Length - 1) "モード）"
-        TrayTip("🎲 ランダムモード", "今回はモード" targetMode "が選ばれました " cycleNote, "Mute")
     }
 
     ; モードパラメータ取得（未定義なら1にフォールバック）
@@ -1307,8 +1338,14 @@ LaunchCroquis() {
     ; モード5・7（教本の模写。タイマー時間が違うだけで挙動は同じ）は画像を
     ; 一切使わないため、フォルダ確認・画像選択・クリップボードコピーをすべてスキップする
     noImageMode := (useMode = 5 || useMode = 7)
+    ; モード8（右脳ドローイング・軽め）は参照ウィンドウ方式で、画像選択・表示は
+    ; すべてlock_window.ahk側（PickFastCroquisImage/CreateFastCroquisRefWindow）が
+    ; 行うため、クリップボードコピーは不要（モード6テストと同じ仕組み）
+    isRefWindowMode := (useMode = 8)
 
-    if (!noImageMode) {
+    if (isRefWindowMode) {
+        TrayTip("🎨 クロッキー開始（軽め）", "1分×10枚の右脳ドローイングを開始します", "Mute")
+    } else if (!noImageMode) {
         if (!DirExist(params.folder)) {
             TrayTip("⚠️ クロッキースキップ", "モード" useMode "の画像フォルダが見つかりません：" params.folder, "Mute")
             LaunchMain()
