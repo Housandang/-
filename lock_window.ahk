@@ -2,6 +2,23 @@
 #SingleInstance Force   ; 既存のインスタンスを確認なしで自動終了・上書き
 
 ; ================================================================
+; ★ DPI認識（変更不要・スクリプト内で一番最初に実行される必要がある）
+;    これを宣言しないと、ディスプレイの拡大率が100%以外（125%/150%など）
+;    の環境で、参照ウィンドウをドラッグでリサイズした際に「マウスの移動量」
+;    と「実際に変化するウィンドウサイズ」が一致しない（Windowsが座標を
+;    仮想的にスケーリングして扱うため）。必ず最初のGui作成より前、
+;    スクリプトのできるだけ早い位置に置くこと。
+;    Windows 10 1703+ → Windows 8.1+ → Vista+ の順にフォールバックする。
+; ================================================================
+try DllCall("SetProcessDpiAwarenessContext", "ptr", -4)          ; Per-Monitor V2
+catch {
+    try DllCall("Shcore\SetProcessDpiAwareness", "int", 2)       ; Per-Monitor
+    catch {
+        try DllCall("SetProcessDPIAware")                        ; System DPI Aware（最終手段）
+    }
+}
+
+; ================================================================
 ; ★ Discord Webhook 設定
 ;    サボりを検知したとき・ロック中にタイマーを終了したときに
 ;    指定のチャンネルへ通知を送ります。
@@ -314,6 +331,9 @@ fastCroquisRefY := 100
 fastCroquisRefW := 400
 fastCroquisRefH := 400
 fastCroquisStopFlagPath := A_ScriptDir "\fast_croquis_stop.txt"
+; 参照ウィンドウの表示に使うHTMLファイル（内部でimg要素をJSで拡縮・切替する。
+; 詳細はWriteFastCroquisHtml参照）
+fastCroquisHtmlPath := A_ScriptDir "\fast_croquis_ref.html"
 
 ; 参照ウィンドウの状態を保持するグローバル変数。
 ; オート実行の早い段階（起動モード分岐で RunFastCroquis() が呼ばれるより前）で
@@ -322,13 +342,24 @@ fastCroquisStopFlagPath := A_ScriptDir "\fast_croquis_stop.txt"
 global fastRefGui := ""
 global fastRefCurrentImage := ""
 global fastCroquisLastError := ""
-; 表示用のPictureコントロール本体（一度作成したら使い回す。詳細はCreateFastCroquisRefWindow参照）
-global fastRefPicCtrl := ""
-; 画像の「本来のピクセルサイズ」のキャッシュ。画像切り替え時にのみ測定し、
-; ウィンドウリサイズ時はこの値を使い回す（リサイズのたびにファイルを
-; 読み直してGDIリソースを浪費しないようにするため。詳細はFitFastCroquisImageToWindow参照）
-global fastRefNatW := 0
-global fastRefNatH := 0
+; 表示エンジン本体（ActiveXコントロールとそのCOMオブジェクト）。
+; 【設計変更の経緯】当初はAHK標準のPicture/Staticコントロールで直接
+; 画像を縮小表示していたが、以下の問題を次々に踏んだ：
+;   ・GuiControlに.Destroy()メソッドが存在しない
+;   ・DllCall(DestroyWindow)で破棄しても内部の名前登録は解除されず、
+;     同名で再Addすると"A control with this name already exists."
+;   ・.Value での画像差し替えは、Add()時のような正しい再スケーリングを
+;     してくれず、一部が拡大されたように表示される
+; これらはWindows標準のSTATIC/Pictureコントロール特有の制約であり、
+; 自前で拡大縮小のジオメトリ計算をし続ける限り再発しかねない。
+; そこで、ブラウザエンジン（Shell.Explorer ActiveX、Windows標準搭載で
+; 追加インストール不要）を埋め込み、画像の拡大縮小・中央寄せは全て
+; CSS/JS側（fast_croquis_ref.html）に任せる方式に変更した。
+; AHK側はimg要素のsrcをJS経由で書き換えるだけでよく、ウィンドウの
+; リサイズもActiveXコントロール自体をMoveするだけで、内部のJS側
+; window.onresizeが自動的に再フィットしてくれる。
+global fastRefWBCtrl := ""   ; ActiveXのGuiControlオブジェクト
+global fastRefWB     := ""  ; WebBrowserのCOMオブジェクト（.Value）
 fastCroquisErrorLogPath := A_ScriptDir "\fast_croquis_error.log"
 
 ; ================================================================
@@ -2412,19 +2443,138 @@ PickFastCroquisImage() {
     return fastCroquisFolder "\" selected
 }
 
-; ===== 右脳ドローイング：参照ウィンドウ（モード6専用・変更不要）=====
+; ===== 右脳ドローイング：参照ウィンドウ（モード6専用）=====
 ; クリップボード貼り付けの代わりに、常時最前面の小さな専用ウィンドウに
 ; モデル画像を直接表示する。60秒ごとにプログラム側で自動的に中身が
 ; 切り替わるため、コピー・貼り付けの手作業が一切不要になる。
 ;
-; 画像は「ウィンドウの現在のクライアント領域に収まる最大サイズ」まで
-; アスペクト比を保ったまま拡大縮小する（歪み・引き伸ばしを防ぐため、
-; 固定のw/hを強制しない。はみ出す余白はウィンドウの背景色＝黒のまま）。
-; ウィンドウをドラッグでリサイズした際も Size イベントで再計算するため、
-; どのサイズにしてもガビガビ・歪みが出ない。
+; 【設計変更の経緯】
+; 当初はAHK標準のPicture/Staticコントロールで直接画像を縮小表示していたが、
+;   ・GuiControlに.Destroy()メソッドが存在しない
+;   ・DllCall(DestroyWindow)で破棄しても内部の名前登録は解除されず、
+;     同名で再Addすると"A control with this name already exists."
+;   ・.Value での画像差し替えは正しい再スケーリングをしてくれず、
+;     一部が拡大されたように表示される
+; と、Windows標準コントロール特有の制約を次々に踏んだ。自前でジオメトリ
+; 計算をし続ける限り再発しかねないため、Shell.Explorer（Windows標準搭載、
+; 追加インストール不要）をActiveXコントロールとしてGuiに埋め込み、画像の
+; 拡大縮小・中央寄せは全てHTML/CSS/JS側（fast_croquis_ref.html）に
+; 任せる方式に変更した。AHK側はimg要素のsrcをJS経由で書き換えるだけでよく、
+; ウィンドウのリサイズもActiveXコントロール自体をMoveするだけで、内部の
+; JS側window.onresizeが自動的に再フィットしてくれる。
+
+; 参照ウィンドウ用HTMLファイルを書き出す（起動のたびに上書きするので、
+; スクリプト更新時も常に最新の内容になる）。
+; #ref（img要素）はJSのfitImage()で「ウィンドウに収まる最大サイズまで
+; アスペクト比を保って拡縮・中央寄せ」される。object-fit:containは
+; Shell.Explorer（Trident/MSHTML）では効かないため、naturalWidth/Height
+; を使って自分でピクセル単位のwidth/height/left/topを計算している。
+WriteFastCroquisHtml() {
+    global fastCroquisHtmlPath
+    html := "
+    (
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<style>
+html, body { margin:0; padding:0; background:#000; overflow:hidden; width:100%; height:100%; }
+#ref { position:absolute; display:none; -ms-user-select:none; user-select:none; }
+body { cursor:move; }
+</style>
+<script>
+// ズーム倍率（ホイールで変更）とパン量（ドラッグで変更）。
+// 新しい画像に切り替わるたびにリセットされる（=常にウィンドウに収まる
+// 標準サイズ・中央位置から始まる）。
+var zoom = 1;
+var panX = 0;
+var panY = 0;
+var dragging = false;
+var dragStartX = 0, dragStartY = 0, panStartX = 0, panStartY = 0;
+
+function render() {
+    var img = document.getElementById('ref');
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    var ww = document.documentElement.clientWidth;
+    var wh = document.documentElement.clientHeight;
+    var scale = Math.min(ww / img.naturalWidth, wh / img.naturalHeight) * zoom;
+    var dw = Math.round(img.naturalWidth * scale);
+    var dh = Math.round(img.naturalHeight * scale);
+    img.style.width  = dw + 'px';
+    img.style.height = dh + 'px';
+    img.style.left = Math.round((ww - dw) / 2 + panX) + 'px';
+    img.style.top  = Math.round((wh - dh) / 2 + panY) + 'px';
+    img.style.display = 'block';
+}
+function setImage(path) {
+    var img = document.getElementById('ref');
+    img.style.display = 'none';
+    zoom = 1;
+    panX = 0;
+    panY = 0;
+    img.onload = render;
+    img.src = path;
+}
+window.onresize = render;
+
+function handleWheel(e) {
+    e = e || window.event;
+    var delta = 0;
+    if (typeof e.deltaY !== 'undefined') delta = -e.deltaY;          // 標準の wheel イベント
+    else if (typeof e.wheelDelta !== 'undefined') delta = e.wheelDelta; // 古い mousewheel イベント
+    else if (typeof e.detail !== 'undefined') delta = -e.detail;
+    if (delta > 0) zoom = zoom * 1.1;
+    else if (delta < 0) zoom = zoom / 1.1;
+    if (zoom < 0.1) zoom = 0.1;
+    if (zoom > 10) zoom = 10;
+    render();
+    if (e.preventDefault) e.preventDefault();
+    if (typeof e.returnValue !== 'undefined') e.returnValue = false;
+    return false;
+}
+// 標準の"wheel"イベントに対応していない環境向けに、古い"mousewheel"にも
+// 対応する。プロパティ代入(onwheel=)だけでは反応しない環境があったため、
+// addEventListenerでも二重に登録して確実性を上げている。
+if (document.addEventListener) {
+    document.addEventListener('wheel', handleWheel, false);
+    document.addEventListener('mousewheel', handleWheel, false);
+} else if (document.attachEvent) {
+    document.attachEvent('onmousewheel', handleWheel);
+}
+document.onwheel = handleWheel;
+document.onmousewheel = handleWheel;
+
+document.onmousedown = function(e) {
+    e = e || window.event;
+    dragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    panStartX = panX;
+    panStartY = panY;
+    return false;
+};
+document.onmousemove = function(e) {
+    if (!dragging) return;
+    e = e || window.event;
+    panX = panStartX + (e.clientX - dragStartX);
+    panY = panStartY + (e.clientY - dragStartY);
+    render();
+};
+document.onmouseup = function(e) {
+    dragging = false;
+};
+document.ondragstart = function() { return false; };
+</script>
+</head>
+<body><img id="ref" alt=""></body>
+</html>
+    )"
+    try FileDelete(fastCroquisHtmlPath)
+    FileAppend(html, fastCroquisHtmlPath, "UTF-8")
+}
 
 CreateFastCroquisRefWindow(firstImagePath) {
-    global fastRefGui, fastCroquisRefX, fastCroquisRefY, fastCroquisRefW, fastCroquisRefH, fastRefCurrentImage, fastRefPicCtrl
+    global fastRefGui, fastCroquisRefX, fastCroquisRefY, fastCroquisRefW, fastCroquisRefH
+    global fastRefCurrentImage, fastRefWBCtrl, fastRefWB, fastCroquisHtmlPath
 
     fastRefGui := Gui("+AlwaysOnTop +Resize", "参照 - 右脳ドローイング")
     fastRefGui.MarginX := 0
@@ -2433,16 +2583,18 @@ CreateFastCroquisRefWindow(firstImagePath) {
     fastRefGui.OnEvent("Size", FastRefWindowResized)
     fastRefGui.Show("x" fastCroquisRefX " y" fastCroquisRefY " w" fastCroquisRefW " h" fastCroquisRefH)
 
-    ; 【バグ修正】表示用コントロールは、この時点で一度だけ作成し、以後は
-    ; 画像切り替え・リサイズのたびに Value（画像差し替え）/Move（位置・
-    ; サイズ変更）で使い回す。かつてはDestroy&再Addで毎回作り直していたが、
-    ; AHK v2のGuiControlには.Destroy()メソッド自体が存在せず、代替として
-    ; DllCall("DestroyWindow",...)でウィンドウハンドルだけ破棄しても、
-    ; Gui内部の「vRefPicという名前は使用済み」という登録は解除されないため、
-    ; 2回目のAdd("vRefPic",...)が "A control with this name already exists."
-    ; で必ず失敗し、参照ウィンドウが真っ黒に固まっていた。同じ名前でAddを
-    ; 複数回呼ぶこと自体をやめ、最初の1回だけ作成する方式に変更した。
-    fastRefPicCtrl := fastRefGui.Add("Picture", "x0 y0 w1 h1 Hidden vRefPic", firstImagePath)
+    WriteFastCroquisHtml()
+
+    fastRefWBCtrl := fastRefGui.Add("ActiveX", "x0 y0 w" fastCroquisRefW " h" fastCroquisRefH, "Shell.Explorer")
+    fastRefWB := fastRefWBCtrl.Value
+    fastRefWB.Navigate("file:///" StrReplace(fastCroquisHtmlPath, "\", "/"))
+
+    ; ローカルファイルなので読み込みはほぼ瞬時だが、念のため完了を少し待つ
+    loop 50 {
+        if (fastRefWB.ReadyState = 4)
+            break
+        Sleep(20)
+    }
 
     fastRefCurrentImage := ""
     ShowFastCroquisImage(firstImagePath)
@@ -2478,121 +2630,42 @@ LogFastCroquisError(path, errMsg) {
     try FileAppend(line, fastCroquisErrorLogPath)
 }
 
-; 【バグ修正】ウィンドウをドラッグでリサイズすると、Windowsは Size イベントを
-; ドラッグ中に連続して大量に発火させる。以前はこのイベントのたびに
-; FitFastCroquisImageToWindow() 内で画像ファイルを再読み込みしてサイズを
-; 測り直していたため、短時間に大量のコントロール作成・破棄（ファイル再読込・
-; GDI+デコードを含む）が発生し、GDIリソースの取り合いで画像読み込みに
-; 失敗し続け、参照ウィンドウが真っ黒に固まる不具合が起きていた。
-; ここでは (1) 実際のFit処理は画像の自然サイズをキャッシュして使い回す
-; （リサイズのたびにファイルを読み直さない）(2) SetTimerの負の period による
-; デバウンスで、ドラッグ中の連続イベントをまとめて「リサイズが一段落してから
-; 1回だけ」処理されるようにする、の2つで対処する。
+; ウィンドウリサイズ時はActiveXコントロール自体を新しいクライアントサイズに
+; 合わせてMoveするだけでよい。埋め込みブラウザの内部windowにresizeイベントが
+; 飛び、fast_croquis_ref.html側のwindow.onresize=fitImageが自動的に
+; 再フィットしてくれるため、AHK側で拡大率などを計算し直す必要がない。
 FastRefWindowResized(GuiObj, MinMax, Width, Height) {
+    global fastRefWBCtrl
     if (MinMax = -1)   ; 最小化時は何もしない
         return
-    ; 80ms以内に再度呼ばれると再スケジュールされる（＝ドラッグ中は発火しない）
-    SetTimer(FastRefFitDebounced, -80)
+    try fastRefWBCtrl.Move(0, 0, Width, Height)
 }
 
-FastRefFitDebounced() {
-    global fastRefCurrentImage, fastCroquisLastError
-    if (!FitFastCroquisImageToWindow())
-        LogFastCroquisError(fastRefCurrentImage, "リサイズ時の再描画に失敗: " fastCroquisLastError)
-}
-
-; 【バグ修正】AHK v2のGuiControlオブジェクト（Gui.Pic等）には .Destroy() という
-; メソッドが存在しない（Gui本体にはあるが個々のコントロールには無い）。
-; これまでの実装では probe.Destroy() / fastRefGui["RefPic"].Destroy() が
-; "This value of type "Gui.Pic" has no method named "Destroy"." で例外を投げ、
-; catchされてFitFastCroquisImageToWindow()がfalseを返すだけで終わっていたため、
-; 表示用コントロールの追加処理（画像を実際に貼るコード）に一度も到達できず、
-; 参照ウィンドウが常に真っ黒のままになっていた。
-; コントロール単体を破棄するには DllCall("DestroyWindow", ...) を使う。
-DestroyGuiControl(ctrl) {
-    if (IsObject(ctrl) && ctrl.HasProp("Hwnd") && ctrl.Hwnd)
-        DllCall("DestroyWindow", "Ptr", ctrl.Hwnd)
-}
-
-; 画像を新規に読み込む（画像切り替え時のみ呼ばれる）。
-; 本来のピクセルサイズを一度だけ測定して fastRefNatW/H にキャッシュし、
-; 表示用コントロール（fastRefPicCtrl）の中身を新しい画像に差し替えたうえで、
-; FitFastCroquisImageToWindow() で実際の位置・サイズを確定する。
+; 画像を新規に読み込む（画像切り替え時に呼ばれる）。
+; HTML側のグローバル関数 setImage() をCOM経由で直接呼び出し、img要素の
+; srcを書き換える。拡大縮小・中央寄せはHTML側のfitImage()が自動で行う。
+; ローカルファイルの読み込みはほぼ瞬時なので、少し待ってから
+; img.complete / naturalWidth を確認し、読み込みに失敗していないかを見る
+; （壊れたファイルなどでは img.onerror 相当の状態になり naturalWidth が 0 のまま）。
 ; 戻り値: 表示に成功したら true、失敗したら false（呼び出し側でリトライに使う）
 LoadFastCroquisImage(path) {
-    global fastRefGui, fastRefPicCtrl, fastRefCurrentImage, fastRefNatW, fastRefNatH, fastCroquisLastError
-    if (fastRefGui = "" || fastRefPicCtrl = "")
+    global fastRefWB, fastRefCurrentImage, fastCroquisLastError
+    if (fastRefWB = "")
         return false
 
     try {
-        ; 本来のピクセルサイズを調べるための非表示プローブ（w/hを省略すると
-        ; 画像本来のピクセルサイズでコントロールが作成される）。
-        ; このコントロールは名前(v)を付けずに毎回新規追加するため、
-        ; 「同名コントロールが既に存在する」問題は起きない（後述のfastRefPicCtrl
-        ; とは異なり使い捨てのため、DllCallでの破棄で十分）。
-        probe := fastRefGui.Add("Picture", "x0 y0 Hidden", path)
-        probe.GetPos(, , &natW, &natH)
-        DestroyGuiControl(probe)
+        win := fastRefWB.Document.parentWindow
+        fileUrl := "file:///" StrReplace(path, "\", "/")
+        win.setImage(fileUrl)
 
-        if (natW <= 0 || natH <= 0) {
-            fastCroquisLastError := "画像サイズの取得に失敗（" natW "x" natH "）"
+        Sleep(60)
+        img := fastRefWB.Document.getElementById("ref")
+        if (!IsObject(img) || !img.naturalWidth) {
+            fastCroquisLastError := "画像の読み込みに失敗しました（形式非対応または破損の可能性）"
             return false
         }
-
-        ; 表示用コントロールの中身を新しい画像に差し替える（位置・サイズは
-        ; まだ古いままだが、直後のFitFastCroquisImageToWindow()で確定するため問題ない）
-        fastRefPicCtrl.Value := path
 
         fastRefCurrentImage := path
-        fastRefNatW := natW
-        fastRefNatH := natH
-        return FitFastCroquisImageToWindow()
-    } catch as e {
-        fastCroquisLastError := e.Message " (" (e.HasProp("What") ? e.What : "") ")"
-        return false
-    }
-}
-
-; 現在の画像を、現在のウィンドウサイズに合わせてアスペクト比を保ったまま
-; 再配置する（画像切り替え時・ウィンドウリサイズ時の両方から呼ばれる）。
-; 【バグ修正の経緯】
-;  1. Move()に-1を渡して高さを自動計算させる方式は挙動が不確実だった
-;     → 非表示プローブで本来のピクセルサイズを取得し、自分で拡大率を計算する方式に変更
-;  2. プローブに "w-1 h-1" と明示指定すると環境によって "Can't create control" になった
-;     → w/h自体を省略する方式に変更
-;  3. リサイズのたびに画像ファイルを再読み込みしてサイズを測り直していたため、
-;     ドラッグ中の連続Sizeイベントで大量のファイル再読込・GDIデコードが発生し、
-;     リソースの取り合いで画像読み込みが失敗し続けていた
-;     → 本来のピクセルサイズは画像切り替え時のみ測定してfastRefNatW/Hにキャッシュし、
-;       リサイズ時はキャッシュ値を使い回す方式に変更
-;  4. 表示用コントロールをDestroy&再Addで毎回作り直していたが、AHK v2の
-;     GuiControlには.Destroy()メソッドが無く、代替のDllCall("DestroyWindow",...)は
-;     ウィンドウハンドルを破棄するだけでGui内部の「vRefPicという名前は使用済み」
-;     という登録までは解除しないため、2回目のAdd()が
-;     "A control with this name already exists." で必ず失敗していた
-;     → 表示用コントロールは最初に一度だけ作成し（CreateFastCroquisRefWindow）、
-;       以後はDestroy&再Addを一切せず、Move()で位置・サイズだけを変更する方式に変更
-; 戻り値: 表示に成功したら true、失敗したら false（呼び出し側でリトライに使う）
-FitFastCroquisImageToWindow() {
-    global fastRefGui, fastRefPicCtrl, fastRefCurrentImage, fastRefNatW, fastRefNatH, fastCroquisLastError
-    if (fastRefCurrentImage = "" || fastRefGui = "" || fastRefPicCtrl = "" || fastRefNatW <= 0 || fastRefNatH <= 0)
-        return false
-
-    try {
-        fastRefGui.GetClientPos(, , &winW, &winH)
-        if (winW <= 0 || winH <= 0) {
-            fastCroquisLastError := "ウィンドウサイズの取得に失敗（" winW "x" winH "）"
-            return false
-        }
-
-        scale := Min(winW / fastRefNatW, winH / fastRefNatH)
-        dispW := Max(1, Round(fastRefNatW * scale))
-        dispH := Max(1, Round(fastRefNatH * scale))
-        offX  := Round((winW - dispW) / 2)
-        offY  := Round((winH - dispH) / 2)
-
-        fastRefPicCtrl.Move(offX, offY, dispW, dispH)
-        fastRefPicCtrl.Visible := true
         return true
     } catch as e {
         fastCroquisLastError := e.Message " (" (e.HasProp("What") ? e.What : "") ")"
@@ -2601,14 +2674,14 @@ FitFastCroquisImageToWindow() {
 }
 
 DestroyFastCroquisRefWindow() {
-    global fastRefGui, fastRefPicCtrl, fastRefCurrentImage, fastRefNatW, fastRefNatH
+    global fastRefGui, fastRefWBCtrl, fastRefWB, fastRefCurrentImage
     try fastRefGui.Destroy()
     fastRefGui := ""
-    fastRefPicCtrl := ""
+    fastRefWBCtrl := ""
+    fastRefWB := ""
     fastRefCurrentImage := ""
-    fastRefNatW := 0
-    fastRefNatH := 0
 }
+
 
 ; 手動停止シグナル（launcher.ahk トレイメニュー「🧪 テストモードを終了」）を確認する。
 ; 各ティック関数の先頭で呼び出し、シグナルファイルがあれば参照ウィンドウを閉じて

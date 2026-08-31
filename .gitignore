@@ -22,3 +22,5 @@ day_state.txt
 overtime_work.txt
 croquis_mode_cycle.txt
 croquis_schedule.txt
+fast_croquis_error.log
+fast_croquis_ref.html
