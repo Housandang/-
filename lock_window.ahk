@@ -2942,7 +2942,7 @@ RunFastCroquisPractice(totalSets, lockSecs, interSecs) {
 }
 
 StartFastCroquisPracticeSet(setNum, totalSets, lockSecs, interSecs) {
-    global g, timerGui, timerTitle, timerCount, timerSub
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisCaptureWait
 
     g.currentSet := setNum
     g.generation += 1
@@ -2981,9 +2981,35 @@ StartFastCroquisPracticeSet(setNum, totalSets, lockSecs, interSecs) {
             SetTimer(FastCroquisPracticeLockTick, 0)
 
             if (setNum >= totalSets) {
-                ; 全セット終了。撮影は行わず、通常のクロッキーと同じ後休憩へ合流する
-                DestroyFastCroquisRefWindow()
-                StartCroquisBreak()
+                ; 【要望】全セット終了後も、通常のクロッキーと同じ撮影処理
+                ; （croquisCaptureWait秒待機→CaptureCroquisResult()でCLIPStudio
+                ; のウィンドウをスクリーンショット保存）を行う。Discordへの
+                ; 報告に使うため、軽量モードだからといって省略しない。
+                FocusModeRestore()
+                DestroyFastCroquisRefWindow()   ; 撮影の邪魔にならないよう先に閉じる
+                g.inCaptureWait := true   ; 撮影待機中は無操作検知の一時停止対象から除外する
+
+                timerTitle.Value := "🎨 まもなく撮影"
+                timerSub.Value   := "画面をズームアウトしてください"
+                SoundPlay("*48")
+                TrayTip("🧠 右脳ドローイング（軽め）終了", croquisCaptureWait " 秒後に撮影します", "Mute")
+
+                captureEnd := A_TickCount + (croquisCaptureWait * 1000)
+                SetTimer(FastCroquisPracticeCaptureCountdownTick, 300)
+
+                FastCroquisPracticeCaptureCountdownTick() {
+                    rem := captureEnd - A_TickCount
+                    if (rem <= 0) {
+                        SetTimer(FastCroquisPracticeCaptureCountdownTick, 0)
+                        CaptureCroquisResult()
+                        NextDnsUnblock()
+                        StartCroquisBreak()
+                        g.inCaptureWait := false
+                        return
+                    }
+                    s := Ceil(rem / 1000)
+                    timerCount.Value := Format("00:{:02d}", s)
+                }
                 return
             }
 
