@@ -467,16 +467,27 @@ OnPower(wParam, lParam, msg, hwnd) {
     if (wParam = PBT_APMSUSPEND) {
         A_IconTip := "Work Launcher - 待機中"
         shouldWrite := true
-        try {
-            lastSleep := Trim(FileRead(sleepLogPath))
-            minutesSinceLastSleep := DateDiff(A_Now, lastSleep, "Minutes")
-            if (minutesSinceLastSleep < 30)
-                shouldWrite := false
+        ; 【バグ修正】以前はここを生のFileRead/FileAppend/FileDeleteで
+        ; 読み書きしていた。スクリプトのリロード時は#SingleInstance Forceの
+        ; 仕組み上、新旧プロセスが一瞬同時に存在する区間があり、そのタイミングで
+        ; スリープ/復帰イベントが重なると、このファイルへの読み書きが競合して
+        ; 空文字・壊れた内容で残ってしまうことがあった。壊れた内容が残ると、
+        ; 復帰時のDateDiff()が例外を投げてtryで握りつぶされ、sleepHoursが
+        ; 初期値の0のまま扱われてしまうため、それ以降どれだけ長く眠っても
+        ; 「6時間未満」と判定され、自動起床ルーティンが二度と発火しなくなる
+        ; （正常なスリープイベントで上書きされるまで直らない）という不具合が
+        ; あった。他の共有ファイルと同じくSafeReadFile/SafeWriteFile（リトライ付き）
+        ; に統一し、競合が起きにくくした。
+        lastSleep := Trim(SafeReadFile(sleepLogPath))
+        if (lastSleep != "") {
+            try {
+                minutesSinceLastSleep := DateDiff(A_Now, lastSleep, "Minutes")
+                if (minutesSinceLastSleep < 30)
+                    shouldWrite := false
+            }
         }
-        if (shouldWrite) {
-            try FileDelete(sleepLogPath)
-            FileAppend(A_Now, sleepLogPath)
-        }
+        if (shouldWrite)
+            SafeWriteFile(sleepLogPath, A_Now)
 
         ; 就寝ブロックは手動トリガー（トレイメニュー→就寝モード開始）方式のみ。
         ; スリープ時刻に基づく自動スケジュールは行わない。
@@ -494,13 +505,28 @@ OnPower(wParam, lParam, msg, hwnd) {
         }
 
         ; スリープ時間が閾値未満なら起動しない
+        ; 【バグ修正】ここも同様にSafeReadFileへ変更。加えて、読み取った値が
+        ; 空・不正な日時形式でDateDiff()が失敗した場合に「sleepHours = 0扱いで
+        ; 起動しない」まま延々と直らなくなることを防ぐため、パース失敗時は
+        ; ログに記録した上でこの一度だけ安全側（起動する）に倒すようにした
+        ; （このタイミングで最新の正常な時刻に上書きもされるので、次回以降は自然に治る）
         sleepHours := 0
-        try {
-            sleepStart := Trim(FileRead(sleepLogPath))
-            sleepHours := DateDiff(A_Now, sleepStart, "Hours")
+        parseFailed := false
+        sleepStart := Trim(SafeReadFile(sleepLogPath))
+        if (sleepStart = "") {
+            parseFailed := true
+        } else {
+            try
+                sleepHours := DateDiff(A_Now, sleepStart, "Hours")
+            catch {
+                parseFailed := true
+            }
         }
-        if (sleepHours < minSleepHours)
+        if (parseFailed) {
+            try FileAppend(FormatTime(, "yyyy-MM-dd HH:mm:ss") " | last_sleep.txt の読み取りに失敗（内容: '" sleepStart "'）。安全側として起床ルーティンを起動します`n", A_ScriptDir "\launcher_error.log")
+        } else if (sleepHours < minSleepHours) {
             return
+        }
 
         StartWakeRoutine()
     }

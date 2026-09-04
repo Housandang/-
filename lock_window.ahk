@@ -316,8 +316,13 @@ croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
 ;        書き込みをスキップするので、テストで画像を消費しない）
 ;
 ;    fastCroquisRefX/Y/W/H
-;      → 参照ウィンドウの初期位置・サイズ（起動後、ウィンドウ自体を
-;        ドラッグ・リサイズして調整可能。ここの値は初期値のみ）
+;      → 参照ウィンドウの初期位置・サイズ（起動のたびにドラッグ・リサイズで
+;        調整した最終的な位置・サイズが fastCroquisRefGeometryPath に自動保存され、
+;        次回起動時はそちらが優先される。ここの値は保存ファイルが無い＝
+;        初回起動時のみに使われる初期値）
+;
+;    fastCroquisRefGeometryPath
+;      → 参照ウィンドウの位置・サイズを記憶するファイル（自動管理・変更不要）
 ;
 ;    fastCroquisStopFlagPath
 ;      → launcher.ahk側のトレイメニュー「🧪 テストモードを終了」から
@@ -331,6 +336,7 @@ fastCroquisRefX := 100
 fastCroquisRefY := 100
 fastCroquisRefW := 400
 fastCroquisRefH := 400
+fastCroquisRefGeometryPath := A_ScriptDir "\fast_croquis_ref_geometry.txt"
 fastCroquisStopFlagPath := A_ScriptDir "\fast_croquis_stop.txt"
 ; 参照ウィンドウの表示に使うHTMLファイル（内部でimg要素をJSで拡縮・切替する。
 ; 詳細はWriteFastCroquisHtml参照）
@@ -2590,7 +2596,28 @@ document.ondragstart = function() { return false; };
 
 CreateFastCroquisRefWindow(firstImagePath) {
     global fastRefGui, fastCroquisRefX, fastCroquisRefY, fastCroquisRefW, fastCroquisRefH
-    global fastRefCurrentImage, fastRefWBCtrl, fastRefWB, fastCroquisHtmlPath
+    global fastRefCurrentImage, fastRefWBCtrl, fastRefWB, fastCroquisHtmlPath, fastCroquisRefGeometryPath
+
+    ; 【要望】前回このウィンドウを閉じた時点の位置・サイズが保存されていれば、
+    ; それを優先して使う（無ければfastCroquisRefX/Y/W/Hの初期値のまま）。
+    ; 保存内容は "x,y,w,h" のカンマ区切り1行。壊れている・値が異常な場合は
+    ; 初期値にフォールバックする（起動不能になることを避けるため）。
+    saved := Trim(SafeReadFile(fastCroquisRefGeometryPath))
+    if (saved != "") {
+        parts := StrSplit(saved, ",")
+        if (parts.Length = 4) {
+            try {
+                sx := Integer(parts[1]), sy := Integer(parts[2])
+                sw := Integer(parts[3]), sh := Integer(parts[4])
+                if (sw >= 100 && sh >= 100) {
+                    fastCroquisRefX := sx
+                    fastCroquisRefY := sy
+                    fastCroquisRefW := sw
+                    fastCroquisRefH := sh
+                }
+            }
+        }
+    }
 
     fastRefGui := Gui("+AlwaysOnTop +Resize", "参照 - 右脳ドローイング")
     fastRefGui.MarginX := 0
@@ -2696,7 +2723,16 @@ LoadFastCroquisImage(path) {
 }
 
 DestroyFastCroquisRefWindow() {
-    global fastRefGui, fastRefWBCtrl, fastRefWB, fastRefCurrentImage
+    global fastRefGui, fastRefWBCtrl, fastRefWB, fastRefCurrentImage, fastCroquisRefGeometryPath
+
+    ; 【要望】閉じる直前の位置・サイズを記憶しておき、次回起動時に復元する
+    if (fastRefGui != "") {
+        try {
+            fastRefGui.GetPos(&gx, &gy, &gw, &gh)
+            SafeWriteFile(fastCroquisRefGeometryPath, gx "," gy "," gw "," gh)
+        }
+    }
+
     try fastRefGui.Destroy()
     fastRefGui := ""
     fastRefWBCtrl := ""
