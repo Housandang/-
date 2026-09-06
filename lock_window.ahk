@@ -369,6 +369,51 @@ global fastRefWBCtrl := ""   ; ActiveXのGuiControlオブジェクト
 global fastRefWB     := ""  ; WebBrowserのCOMオブジェクト（.Value）
 fastCroquisErrorLogPath := A_ScriptDir "\fast_croquis_error.log"
 
+; 【要望】参照ウィンドウはタイトルバー（-Caption）を無くしたため、
+; 通常のドラッグ移動手段が失われる。代わりに「ウィンドウ上のどこでも
+; 右クリック＋ドラッグで移動できる」機能を実装する。
+;
+; 仕組み：右ボタンが押された瞬間、Windowsに対して「今のはタイトルバーを
+; 掴んだのと同じ操作です」という合成メッセージ（WM_NCLBUTTONDOWN +
+; HTCAPTION）を送るだけで、あとの移動処理（追従・スナップ等）は完全に
+; Windows標準の移動処理に委ねる。自前でマウス座標を追いかける実装より
+; 感触が自然になる、枠を消したアプリ全般で使われる標準的な手法。
+; ホットキーは"~"を付けない（RButton::）ため、埋め込みブラウザ側には
+; 右クリックが一切渡らず、ブラウザ標準の右クリックメニューも出ない。
+;
+; 参照ウィンドウが存在せず、かつマウスカーソルがその上に無いときは
+; 何もしない（#HotIfの条件関数で判定。WinActiveではなくマウス位置で
+; 判定しているのは、参照ウィンドウが常時最前面ではあってもOS上の
+;「アクティブウィンドウ」とは限らないため）。
+;
+; 【バグ修正】当初は MouseGetPos の第3引数（カーソル下のウィンドウの
+; ハンドル）と fastRefGui.Hwnd を直接比較していたが、右クリックドラッグが
+; 反応しなかった。参照ウィンドウの中身は全面が埋め込みブラウザ（ActiveX＝
+; Shell.Explorer）で、これはAHKが管理する通常のGuiControlとは異なる、
+; 別のウィンドウ階層（"Internet Explorer_Server"等）を子孫として持つ。
+; MouseGetPosのウィンドウハンドル解決がこの階層をうまく遡ってくれず、
+; fastRefGui自身のHwndと一致しなかったのが原因と考えられる。
+; ウィンドウ判定に依存せず、単純に「マウス座標が参照ウィンドウの矩形内に
+; あるか」で判定する方式に変更し、この問題を回避した。
+IsMouseOverRefWindow() {
+    global fastRefGui
+    if (fastRefGui = "")
+        return false
+    try fastRefGui.GetPos(&wx, &wy, &ww, &wh)
+    catch
+        return false
+    MouseGetPos(&mx, &my)
+    return (mx >= wx && mx < wx + ww && my >= wy && my < wy + wh)
+}
+
+#HotIf IsMouseOverRefWindow()
+RButton:: {
+    global fastRefGui
+    if (fastRefGui != "")
+        PostMessage(0xA1, 2, 0, , fastRefGui.Hwnd)   ; WM_NCLBUTTONDOWN + HTCAPTION
+}
+#HotIf
+
 ; ================================================================
 ; ★ 中休みモードの設定
 ;
@@ -2619,7 +2664,14 @@ CreateFastCroquisRefWindow(firstImagePath) {
         }
     }
 
-    fastRefGui := Gui("+AlwaysOnTop +Resize", "参照 - 右脳ドローイング")
+    ; 【要望】タイトルバー（キャプション）を非表示にし、画像以外の余計な
+    ; 要素を減らす。-Caption はリサイズ用の枠（+Resize）とは独立しており、
+    ; 端をドラッグしてのリサイズは引き続き機能する。タイトルバーが無い分、
+    ; 通常のドラッグ移動手段が失われるため、代わりに右クリックドラッグでの
+    ; 移動を下記（IsMouseOverRefWindow/#HotIf）で実装している。
+    ; 右上の閉じるボタンも無くなるが、Alt+F4は引き続き有効で、セット終了時の
+    ; 自動クローズやテストモードの手動停止もこれとは無関係に機能する。
+    fastRefGui := Gui("+AlwaysOnTop +Resize -Caption", "参照 - 右脳ドローイング")
     fastRefGui.MarginX := 0
     fastRefGui.MarginY := 0
     fastRefGui.BackColor := "000000"
