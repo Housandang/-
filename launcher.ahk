@@ -334,6 +334,7 @@ trayMenu.Add("🌙 就寝モードをキャンセル", OnNightModeCancel)
 trayMenu.Add()
 trayMenu.Add("🔁 スリープ解除ルーティンを手動実行 (" delayMinutes "分待機→クロッキー→作業)", OnManualWakeRoutine)
 trayMenu.Add("🧪 右脳ドローイング（テスト実行）", OnFastCroquisTest)
+trayMenu.Add("🧪 スマホ格納確認テスト", OnTestPhoneBoxConfirmation)
 trayMenu.Add("🚫 本日のクロッキーをスキップ（代わりに軽量版を実行）", OnToggleSkipCroquis)
 
 ; ===== 本日のクロッキーをスキップ（変更不要）=====
@@ -1436,8 +1437,23 @@ LaunchMainAfterCroquis() {
 
 LaunchMain() {
     global scriptPath, wakeRoutineActive
+
+    ; 【要望・新機能】作業開始直前に、スマホがロック箱に入ったこと（NFCタップ→
+    ; Discordへの"BOX_IN"メッセージ）を確認する待機を挟む。確認できないまま
+    ; 時間切れになった場合は、既存のlauncher.ahk異常終了通知等と同じ扱いで
+    ; サボりとしてDiscordに通知する（作業自体はそのまま開始する。確認できない
+    ; からといって作業を止めてしまうと本末転倒なため）。
+    if (!WaitForPhoneBoxConfirmation())
+        ReportPhoneBoxMissing()
+
+    ; 【要望】lock_window.ahkを自発的に直接起動した場合にも同じ確認を行える
+    ; よう、lock_window.ahk側にも同様のチェックを実装した。ここ（launcher.ahk
+    ; 経由の自動起動）では既に上で確認済みのため、"/auto:confirmed" という
+    ; 印を付けて渡すことで、lock_window.ahk側が二重にチェックしないように
+    ; している（二重チェックすると、確認済みのBOX_INを「もう古い」と
+    ; 誤判定し、新しい信号を待ち続けて誤ったサボり通知を出してしまうため）。
     wakeRoutineActive := false   ; 待機→クロッキー→作業のルーティンはここで完了
-    Run('"' scriptPath '" /auto')
+    Run('"' scriptPath '" /auto:confirmed')
 }
 
 ; ================================================================
@@ -1609,6 +1625,217 @@ CheckAbsence() {
     ; 操作が再開されたら警告フラグをリセット
     if (idleMs < warnMs)
         sabo.warnedThisIdle := false
+}
+
+; ================================================================
+; ★ スマホのスクリーンタイム制限突破検知／箱格納確認（要望・新機能）
+;
+;    【方式変更】当初はローカルHTTPサーバー（phone_signal_server.ahk）を
+;    別プロセスで常駐させ、iPhoneから直接PCへHTTPリクエストを送る方式で
+;    実装したが、「IPアドレス・ポートの管理が面倒で動作しづらい」との
+;    指摘を受け、Discordの専用チャンネルを介する方式に作り直した。
+;    phone_signal_server.ahk は不要になったため削除してよい。
+;
+;    【メッセージの種類】専用チャンネルには2種類のメッセージが届く：
+;      ・"BOX_IN"    … NFCタップ（スマホをロック箱に入れた合図）
+;      ・"SABOTAGE"  … スマホ側の目印用集中モードがONの間に対象アプリが
+;                       開かれた（＝箱から出して使った）合図
+;    当初は両方とも"SABOTAGE"で送る想定だったが、「作業開始時にBOX_INを
+;    一定時間待ち受けて未達なら即サボり通知」という要望が追加され、
+;    2つを区別する必要が生じたため、メッセージ内容で判定するよう変更した。
+;    iPhone側のNFCタップ用オートメーションでは、Webhookで送るJSON本文を
+;    {"content":"SABOTAGE"} ではなく {"content":"BOX_IN"} に変更すること。
+;
+;    【スマホ側の集中モードについて】「休止時間」「App使用時間の制限」を
+;    自動でON/OFFするショートカットのアクションは存在しないため、
+;    集中モードはアプリを実際にブロックする目的ではなく、あくまで
+;    「アプリが開かれたらDiscordに通知するかどうか」の目印としてのみ
+;    使っている（ブロック自体はしていない）。詳細な検討経緯は
+;    「直近の変更履歴」を参照。
+;
+;    【常時ポーリングとBOX_IN待機の関係】`CheckPhoneSignalChannel()`は
+;    起動から常時15秒ごとにポーリングを続け、SABOTAGE内容のメッセージを
+;    検知する（作業ロック中のみサボりとして扱う）。一方、作業開始直前の
+;    `WaitForPhoneBoxConfirmation()`は、その場でBOX_INメッセージだけを
+;    短い間隔でポーリングして待つ、一時的な処理。両者は同じ
+;    `phoneSignalLastId`（直近まで処理済みのメッセージID）を共有しており、
+;    どちらか一方が新着メッセージを読んだら、もう一方が同じメッセージを
+;    二重に処理することはない（`ProcessPhoneSignalMessage()`に処理を
+;    一本化しているため、BOX_IN待機中に万一SABOTAGEが届いても
+;    取りこぼさない）。
+;
+;    【あなたに必要な設定（このスクリプトの外での作業）】
+;      1. Discord Developer Portal (https://discord.com/developers/applications)
+;         で新規Applicationを作成し、Botタブから Bot を追加してトークンを
+;         取得する（下記 phoneSignalBotToken に設定）
+;      2. Bot設定画面で「Message Content Intent」を必ずONにする（OFFのままだと
+;         メッセージの中身が取得できずSABOTAGE/BOX_INの判定ができない）
+;      3. サーバー内に専用チャンネル（他の用途と混ざらないよう新規作成推奨）を
+;         作り、そのBotを「View Channel」「Read Message History」権限で招待する
+;      4. Discordの「開発者モード」をON（ユーザー設定→詳細設定）にした上で、
+;         そのチャンネルを右クリック→「チャンネルIDをコピー」
+;         （下記 phoneSignalChannelId に設定）
+;      5. そのチャンネルに「Webhookを作成」し、URLをiPhone側のショートカット
+;         （POSTでJSONボディ。NFCタップ用は{"content":"BOX_IN"}、
+;         アプリを開いた時用は{"content":"SABOTAGE"}）に設定する
+;         （送信側は既存のDiscord通知と全く同じ仕組みなので、Botは送信には
+;         一切関与しない。Botは読み取り専用）
+; ================================================================
+phoneSignalBotToken   := "MTU0OTI1OTM2NDE5MDEzNDMzMg.GPLPdL.M06J1NJPIiSGmMKgZUV4M9OuaO1MmHOgAv3HcI"
+phoneSignalChannelId  := "1548958253658931290"
+phoneSignalLastId     := ""   ; 前回確認済みのメッセージID（自動管理・起動時に現在の最新IDで初期化する）
+
+; 起動時点で既にチャンネルにある最新メッセージを「既読」扱いにしておく
+; （これをしないと、スクリプト起動のたびに過去の古いメッセージを
+; 「新しい信号」と誤検知してしまう）
+if (phoneSignalBotToken != "" && phoneSignalChannelId != "") {
+    initMsg := FetchLatestDiscordMessage(phoneSignalChannelId, phoneSignalBotToken)
+    phoneSignalLastId := initMsg.id
+}
+
+SetTimer(CheckPhoneSignalChannel, 15000)
+
+; Discordの指定チャンネルの最新メッセージ（1件）をREST APIで取得する。
+; 取得に失敗した場合（トークン未設定・ネットワーク不通等）は
+; id・content とも空文字を返す（呼び出し側は「新しい信号なし」として扱う）。
+FetchLatestDiscordMessage(channelId, botToken) {
+    result := {id: "", content: "", status: "", raw: ""}
+    if (channelId = "" || botToken = "")
+        return result
+    try {
+        http := ComObject("WinHttp.WinHttpRequest.5.1")
+        http.Open("GET", "https://discord.com/api/v10/channels/" channelId "/messages?limit=1", false)
+        http.SetRequestHeader("Authorization", "Bot " botToken)
+        ; 【バグ修正】User-Agentを指定していなかったため、CloudflareがDiscordの
+        ; APIへのアクセスを機械的なアクセスと判定してブロックし、
+        ; 403 + code:40333 "internal network error"（Discord自体の障害では
+        ; なく、Cloudflareによるブロックであることが確認されている既知の
+        ; 現象）が返っていた。Discordが推奨する形式のUser-Agentを明示的に
+        ; 付けることで回避する。
+        http.SetRequestHeader("User-Agent", "DiscordBot (https://github.com/, 1.0)")
+        http.Send()
+        result.status := http.Status
+        resp := http.ResponseText
+        result.raw := resp
+        if RegExMatch(resp, '"id"\s*:\s*"(\d+)"', &mId)
+            result.id := mId[1]
+        if RegExMatch(resp, '"content"\s*:\s*"(.*?)(?<!\\)"', &mContent)
+            result.content := mContent[1]
+    } catch as e {
+        result.raw := "例外: " e.Message
+    }
+    return result
+}
+
+; メッセージ内容に応じた処理を行う（SABOTAGEのみ扱う。BOX_INはここでは
+; 何もしない＝WaitForPhoneBoxConfirmation()側で個別に処理するため）。
+; 定期ポーリング（CheckPhoneSignalChannel）とBOX_IN待機
+; （WaitForPhoneBoxConfirmation）の両方から呼ばれる共通処理。
+ProcessPhoneSignalMessage(content) {
+    global sabo, phaseFile
+
+    if (!InStr(content, "SABOTAGE"))
+        return   ; BOX_IN等、SABOTAGE以外の内容はここでは何もしない
+
+    ; ロック中以外（休憩・食事・就寝後等）の検知はサボりとして扱わない
+    phase := ""
+    try phase := Trim(SafeReadFile(phaseFile))
+    if (phase != "lock")
+        return
+
+    sabo.saboCount += 1
+    detectedTime := FormatTime(, "HH:mm")
+    sabo.entries.Push("・📱 スマホの制限突破 " sabo.saboCount " 回目（" detectedTime "）")
+    SendDiscord("📱🚨 **スマホのスクリーンタイム制限を突破してアプリを開いたことを検知しました（" sabo.saboCount " 回目）**`n作業ロック中に検知（" detectedTime "）")
+}
+
+CheckPhoneSignalChannel() {
+    global phoneSignalLastId, phoneSignalChannelId, phoneSignalBotToken
+
+    if (phoneSignalChannelId = "" || phoneSignalBotToken = "")
+        return   ; 未設定の場合は何もしない
+
+    msg := FetchLatestDiscordMessage(phoneSignalChannelId, phoneSignalBotToken)
+    if (msg.id = "" || msg.id = phoneSignalLastId)
+        return   ; 取得失敗、または前回と同じ（新着メッセージが無い）
+
+    phoneSignalLastId := msg.id
+    ProcessPhoneSignalMessage(msg.content)
+}
+
+; 【要望・新機能】作業開始直前に呼ばれる。スマホをロック箱に入れた合図
+; （BOX_IN）が届くまで、最大 timeoutSecs 秒だけ待つ。
+; 戻り値: true=BOX_INを確認できた（またはこの機能自体が未設定）、
+;         false=確認できないまま時間切れ
+; 【重要】この待機中に届いたSABOTAGEメッセージも、取りこぼさず
+; ProcessPhoneSignalMessage()で処理する（BOX_IN以外は無視して待ち続ける）。
+WaitForPhoneBoxConfirmation(timeoutSecs := 60) {
+    global phoneSignalLastId, phoneSignalChannelId, phoneSignalBotToken
+
+    if (phoneSignalChannelId = "" || phoneSignalBotToken = "")
+        return true   ; 未設定の場合はこの機能自体を無効化し、従来通り素通りさせる
+
+    TrayTip("📱 スマホを箱に入れてください", "確認できるまで作業開始を少し待ちます（最大" timeoutSecs "秒）", "Mute")
+
+    deadline := A_TickCount + (timeoutSecs * 1000)
+    loop {
+        msg := FetchLatestDiscordMessage(phoneSignalChannelId, phoneSignalBotToken)
+        if (msg.id != "" && msg.id != phoneSignalLastId) {
+            phoneSignalLastId := msg.id
+            if (InStr(msg.content, "BOX_IN"))
+                return true
+            ProcessPhoneSignalMessage(msg.content)
+        }
+        if (A_TickCount >= deadline)
+            return false
+        Sleep(2000)
+    }
+}
+
+; 【要望・新機能】作業開始までにスマホの箱格納確認ができなかった場合の通知。
+; 既存の「launcher.ahk異常終了」通知等と同様、サボりの証跡として扱う。
+; 作業自体はこの後そのまま開始する（止めてしまうと本末転倒なため）。
+ReportPhoneBoxMissing() {
+    global sabo
+    sabo.saboCount += 1
+    detectedTime := FormatTime(, "HH:mm")
+    sabo.entries.Push("・📱 スマホの箱格納が未確認のまま作業開始 " sabo.saboCount " 回目（" detectedTime "）")
+    SendDiscord("📱⚠️ **作業開始までにスマホをロック箱に入れた確認ができませんでした（" sabo.saboCount " 回目）**`n（" detectedTime "）")
+}
+
+; 【要望・新機能】トレイメニュー「🧪 スマホ格納確認テスト」用のテスト実行。
+; 作業を実際に開始することなく、WaitForPhoneBoxConfirmation()（BOX_IN検知の
+; 本体・本番と全く同じ処理）だけを単独で試せる。本番より短いタイムアウト
+; （20秒）にして素早く確認できるようにしている。
+; 【重要】検知に失敗しても ReportPhoneBoxMissing() は呼ばない＝本番のサボり
+; カウント（sabo.saboCount/sabo.entries）には一切影響せず、偽のサボり通知が
+; Discordに飛ぶこともない。トレイ通知（TrayTip）で結果を表示するだけ。
+;
+; 【診断機能】確認できなかった場合、原因調査のため phone_signal_debug.log に
+; 直近のAPI応答（HTTPステータスコード・生のレスポンス本文）を書き出す。
+; トークンやチャンネルIDの設定ミス・Bot権限不足・Message Content Intent
+; 未設定などは、この生の応答を見れば大抵すぐに切り分けられる。
+OnTestPhoneBoxConfirmation(*) {
+    global phoneSignalChannelId, phoneSignalBotToken
+
+    if (phoneSignalChannelId = "" || phoneSignalBotToken = "") {
+        TrayTip("🧪 スマホ格納確認テスト", "phoneSignalBotToken / phoneSignalChannelId が未設定です", "Mute")
+        return
+    }
+
+    TrayTip("🧪 スマホ格納確認テスト", "最大20秒、BOX_IN信号を待ちます…（NFCタグをタップしてください）", "Mute")
+
+    if (WaitForPhoneBoxConfirmation(20)) {
+        TrayTip("🧪 スマホ格納確認テスト", "✅ BOX_IN信号を確認できました", "Mute")
+        return
+    }
+
+    ; 確認できなかった場合、原因調査用にもう一度APIを直接叩いて生の応答を記録する
+    debugResult := FetchLatestDiscordMessage(phoneSignalChannelId, phoneSignalBotToken)
+    debugLine := FormatTime(, "yyyy-MM-dd HH:mm:ss") " | HTTPステータス: " debugResult.status " | id: " debugResult.id " | content: " debugResult.content " | 生の応答: " debugResult.raw "`n"
+    try FileAppend(debugLine, A_ScriptDir "\phone_signal_debug.log")
+
+    TrayTip("🧪 スマホ格納確認テスト", "❌ BOX_IN信号は確認できませんでした（本番への影響はありません）`nphone_signal_debug.log に詳細を記録しました", "Mute")
 }
 
 ; ================================================================

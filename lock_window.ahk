@@ -18,6 +18,13 @@ catch {
     }
 }
 
+; 【バグ修正】参照ウィンドウの右クリックドラッグ判定（IsMouseOverRefWindow。
+; MouseGetPosとfastRefGui.GetPos()の座標を比較する）が機能しなかった原因の
+; 一つとして、CoordModeの既定値に依存していたことが疑われるため、Mouse座標を
+; 明示的にScreen基準に固定する。GetPos()側は常にScreen座標を返すため、
+; 両者を確実に同じ基準で比較できるようにする。
+CoordMode("Mouse", "Screen")
+
 ; ================================================================
 ; ★ Discord Webhook 設定
 ;    サボりを検知したとき・ロック中にタイマーを終了したときに
@@ -135,6 +142,86 @@ SendDiscordAlert(msg) {
         http.SetRequestHeader("Content-Type", "application/json")
         http.Send(body)
     }
+}
+
+; ================================================================
+; ★ スマホの箱格納確認（要望・新機能・launcher.ahk側の複製）
+;
+;    launcher.ahkのLaunchMain()にある同名機能の複製。lock_window.ahkと
+;    launcher.ahkは別プロセスでメモリを共有できないため、設定値・処理を
+;    それぞれに個別に持たせている。
+;
+;    【重要】下記2つの設定値は、launcher.ahk側のphoneSignalBotToken /
+;    phoneSignalChannelIdと必ず同じ値にすること（2箇所に同じ値を書く
+;    必要がある。片方だけ更新すると食い違って動かなくなる）。
+;
+;    この確認は、launcher.ahk経由の自動起動では実行されない
+;    （launcher.ahk側で既に確認済みのため、"/auto:confirmed"引数で
+;    起動され、autoAlreadyConfirmed=trueになる）。lock_window.ahkを
+;    直接"/auto"で起動した場合（autoAlreadyConfirmed=false）にのみ、
+;    ここで改めてBOX_IN確認を行う。
+; ================================================================
+phoneSignalBotToken  := "MTU0OTI1OTM2NDE5MDEzNDMzMg.GPLPdL.M06J1NJPIiSGmMKgZUV4M9OuaO1MmHOgAv3HcI"
+phoneSignalChannelId := "1548958253658931290"
+
+; Discordの指定チャンネルの最新メッセージ（id・content）を取得する。
+; launcher.ahk側のFetchLatestDiscordMessage()の簡易版（HTTPステータス・
+; 生の応答は返さない。詳細な診断が必要な場合はlauncher.ahk側の
+; phone_signal_debug.logを参照すること）。
+FetchLatestDiscordMessageLocal(channelId, botToken) {
+    result := {id: "", content: ""}
+    if (channelId = "" || botToken = "")
+        return result
+    try {
+        http := ComObject("WinHttp.WinHttpRequest.5.1")
+        http.Open("GET", "https://discord.com/api/v10/channels/" channelId "/messages?limit=1", false)
+        http.SetRequestHeader("Authorization", "Bot " botToken)
+        ; Cloudflareが機械的なアクセスと誤判定してブロックする（403 + code:40333
+        ; "internal network error"）ことがあるため、User-Agentを明示的に付ける
+        http.SetRequestHeader("User-Agent", "DiscordBot (https://github.com/, 1.0)")
+        http.Send()
+        resp := http.ResponseText
+        if RegExMatch(resp, '"id"\s*:\s*"(\d+)"', &mId)
+            result.id := mId[1]
+        if RegExMatch(resp, '"content"\s*:\s*"(.*?)(?<!\\)"', &mContent)
+            result.content := mContent[1]
+    }
+    return result
+}
+
+; 戻り値: true=BOX_IN確認できた（またはBot未設定でこの機能自体が無効）、
+;         false=確認できないまま時間切れ
+; 【重要】開始時点で既にチャンネルにある最新メッセージは「古いもの」として
+; 無視し、それより後に新しく届いたメッセージだけを対象にする（過去の
+; BOX_INを今回の分として誤って扱わないため）。
+WaitForPhoneBoxConfirmationLocal(timeoutSecs := 60) {
+    global phoneSignalChannelId, phoneSignalBotToken
+
+    if (phoneSignalChannelId = "" || phoneSignalBotToken = "")
+        return true   ; 未設定の場合はこの機能自体を無効化し、従来通り素通りさせる
+
+    baseline := FetchLatestDiscordMessageLocal(phoneSignalChannelId, phoneSignalBotToken)
+    lastId := baseline.id
+
+    TrayTip("📱 スマホを箱に入れてください", "確認できるまで作業開始を少し待ちます（最大" timeoutSecs "秒）", "Mute")
+
+    deadline := A_TickCount + (timeoutSecs * 1000)
+    loop {
+        msg := FetchLatestDiscordMessageLocal(phoneSignalChannelId, phoneSignalBotToken)
+        if (msg.id != "" && msg.id != lastId) {
+            lastId := msg.id
+            if (InStr(msg.content, "BOX_IN"))
+                return true
+        }
+        if (A_TickCount >= deadline)
+            return false
+        Sleep(2000)
+    }
+}
+
+ReportPhoneBoxMissingLocal() {
+    detectedTime := FormatTime(, "HH:mm")
+    SendDiscordAlert("📱⚠️ **作業開始までにスマホをロック箱に入れた確認ができませんでした**`n（" detectedTime "・lock_window.ahk直接起動時）")
 }
 
 ; ===== NextDNS ブロック・解除（変更不要）=====
@@ -294,6 +381,15 @@ croquisLockSecs    := 1500   ; 25分
 croquisShotDir     := A_ScriptDir "\croquis_shots"   ; キャプチャ保存先
 croquisCaptureWait := 180    ; タイマー終了からスクショ撮影までの猶予（秒）
 croquisBreakSecs   := 600    ; クロッキー後の休憩時間（秒）
+
+; 【要望】セット1開始前の準備待機（画像貼り付け・机の準備等）は、最低でも
+; この秒数を確保する。モード3（interSecs=60秒）やモード8（interSecs=20秒）
+; のように、セット間の休憩自体は短く設計されているモードでも、"最初の"
+; 準備時間だけはこれより短くならないようにするための下限値。
+; セット間（2セット目以降）の休憩時間には影響しない（そちらは各モードの
+; interSecsのまま）。実際の待機秒数は Max(interSecs, croquisStartupWaitMinSecs)
+; で決まるため、interSecsが元々これより長いモード（5・7など）はそのまま。
+croquisStartupWaitMinSecs := 180   ; 3分
 
 ; ================================================================
 ; ★ 右脳ドローイング（テスト実行専用・変更不要）
@@ -1821,13 +1917,21 @@ ResumeAfterExercise() {
 }
 
 ; ===== 起動モード判定（変更不要）=====
-global isAuto     := false
+global isAuto             := false
+global autoAlreadyConfirmed := false   ; launcher.ahk経由で既にスマホ確認済みかどうか
 global isCroquis  := false
 global croquisArg := {lockSecs: 1500, sets: 1, interSecs: 0, mode: 1, isTest: false}   ; デフォルトはモード1
 
 for arg in A_Args {
-    if (arg = "/auto")
+    if (arg = "/auto") {
         isAuto := true
+    } else if (arg = "/auto:confirmed") {
+        ; launcher.ahk側のLaunchMain()が既にスマホの箱格納確認を済ませて
+        ; いる場合に渡される。この場合はlock_window.ahk側では確認をせず
+        ; 素通りする（詳細は下記isAutoブロック内のコメント参照）。
+        isAuto := true
+        autoAlreadyConfirmed := true
+    }
     if (SubStr(arg, 1, 8) = "/croquis") {
         isCroquis := true
         ; /croquis:lockSecs:sets:interSecs:mode:test の形式で受け取る
@@ -1887,6 +1991,16 @@ if (isCroquis) {
         RunPomodoroCroquis(targetTitles, croquisArg.lockSecs, croquisArg.sets, croquisArg.interSecs)
 
 } else if (isAuto) {
+    ; 【要望・新機能】lock_window.ahkを自発的に直接/autoで起動してロックを
+    ; 開始した場合にも、launcher.ahk経由の自動起動と同じスマホの箱格納確認を
+    ; 行う。launcher.ahk側で既に確認済み（autoAlreadyConfirmed = true、
+    ; "/auto:confirmed"で起動された場合）はここでは何もしない
+    ; （二重チェックによる誤ったサボり通知を防ぐため）。
+    if (!autoAlreadyConfirmed) {
+        if (!WaitForPhoneBoxConfirmationLocal())
+            ReportPhoneBoxMissingLocal()
+    }
+
     targetTitles := []
     for site in siteList {
         targetTitles.Push(site.key)
@@ -2172,7 +2286,7 @@ CaptureCroquisResult() {
 
 ; ===== クロッキー専用ポモドーロ（変更不要）=====
 RunPomodoroCroquis(targetTitles, lockSecs, totalSets, interSecs) {
-    global g, timerGui, timerTitle, timerCount, timerSub, croquisCaptureWait
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisCaptureWait, croquisStartupWaitMinSecs
 
     g.targetTitles := targetTitles
     g.totalSets    := totalSets
@@ -2186,8 +2300,12 @@ RunPomodoroCroquis(targetTitles, lockSecs, totalSets, interSecs) {
     ; 最初の画像は launcher.ahk が起動前にクリップボードへコピー済みなので、
     ; ここで新しく画像を選ぶ必要はない（貼り付けの案内と待機のみ）。
     ; interSecs が 0 のモードでは待機画面を出さず、そのままセット1を開始する。
+    ; 【要望】ただし開始前の待機だけは croquisStartupWaitMinSecs 秒を下回らない
+    ; ようにする（モード3・8のようにinterSecsが短いモードでも、最初の準備
+    ; 時間だけは数分確保する）。セット間（2セット目以降）の休憩は
+    ; g.croquisInter = interSecs のまま変えていない。
     if (interSecs > 0)
-        StartCroquisFirstWait(totalSets, interSecs)
+        StartCroquisFirstWait(totalSets, Max(interSecs, croquisStartupWaitMinSecs))
     else
         StartNextCroquisSet()
 }
@@ -2612,6 +2730,12 @@ document.onmousewheel = handleWheel;
 
 document.onmousedown = function(e) {
     e = e || window.event;
+    // 【バグ修正】ボタンの種類を見ずにパンを開始していたため、右クリックが
+    // ウィンドウ移動用に予約されているにも関わらず、右クリックドラッグでも
+    // 画像がパンされてしまっていた（右クリックがAHK側で横取りされず、この
+    // ハンドラまで届いてしまうケースへの対策も兼ねる）。左ボタン（button===0）
+    // 以外では何もしない。
+    if (e.button !== 0) return;
     dragging = true;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
@@ -2630,6 +2754,10 @@ document.onmouseup = function(e) {
     dragging = false;
 };
 document.ondragstart = function() { return false; };
+// 右クリックはウィンドウ移動専用のため、ブラウザ標準の右クリックメニューを
+// 常に抑制する（AHK側でのRButton横取りが何らかの理由で効かなかった場合の
+// 保険も兼ねる）
+document.oncontextmenu = function() { return false; };
 </script>
 </head>
 <body><img id="ref" alt=""></body>
@@ -2811,7 +2939,7 @@ CheckFastCroquisStop() {
 ; 60秒 × totalSets。fastCroquisCaptureEvery セットごとに撮影（croquisCaptureWait
 ; 秒待機）を挟み、それ以外のセットは撮影せず即座に次の画像へ切り替える。
 RunFastCroquis(totalSets, lockSecs, preWaitSecs) {
-    global g, timerGui, timerTitle, timerCount, timerSub, croquisArg
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisArg, croquisStartupWaitMinSecs
 
     g.totalSets    := totalSets
     g.lockSecs     := lockSecs
@@ -2822,7 +2950,10 @@ RunFastCroquis(totalSets, lockSecs, preWaitSecs) {
     firstImg := PickFastCroquisImage()
     CreateFastCroquisRefWindow(firstImg)
 
-    ; セット1開始前の待機（参照ウィンドウの位置・サイズ調整用）
+    ; 【要望】セット1開始前の待機（参照ウィンドウの位置・サイズ調整用）は
+    ; croquisStartupWaitMinSecs 秒を下回らないようにする
+    preWaitSecs := Max(preWaitSecs, croquisStartupWaitMinSecs)
+
     g.generation += 1
     myGen     := g.generation
     g.phase   := "break"
@@ -2984,7 +3115,7 @@ StartFastCroquisCapture(setNum, totalSets, lockSecs) {
 ;     croquis_done を書き込んで作業タイマーへ引き継ぐ（テストのように
 ;     単独で終了するのではなく、本番のクロッキーと同じ扱いになる）
 RunFastCroquisPractice(totalSets, lockSecs, interSecs) {
-    global g, timerGui, timerTitle, timerCount, timerSub
+    global g, timerGui, timerTitle, timerCount, timerSub, croquisStartupWaitMinSecs
 
     g.totalSets    := totalSets
     g.lockSecs     := lockSecs
@@ -2995,11 +3126,16 @@ RunFastCroquisPractice(totalSets, lockSecs, interSecs) {
     firstImg := PickFastCroquisImage()
     CreateFastCroquisRefWindow(firstImg)
 
-    ; セット1開始前の待機（参照ウィンドウの位置・サイズ調整用。モード6テストと同じ挙動）
+    ; セット1開始前の待機（参照ウィンドウの位置・サイズ調整用。モード6テストと同じ挙動）。
+    ; 【要望】開始前の待機だけは croquisStartupWaitMinSecs 秒を下回らないようにする
+    ; （interSecs自体は書き換えない。以降のセット間休憩＝StartFastCroquisPracticeBreak
+    ; にはそのままの短い interSecs が渡っていく必要があるため、別変数にしている）
+    firstWaitSecs := Max(interSecs, croquisStartupWaitMinSecs)
+
     g.generation += 1
     myGen     := g.generation
     g.phase   := "break"
-    g.endTick := A_TickCount + (interSecs * 1000)
+    g.endTick := A_TickCount + (firstWaitSecs * 1000)
     WritePhase("break")
 
     timerGui.BackColor := "4A148C"
