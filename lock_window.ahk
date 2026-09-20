@@ -163,13 +163,16 @@ SendDiscordAlert(msg) {
 ; ================================================================
 phoneSignalBotToken  := "MTU0OTI1OTM2NDE5MDEzNDMzMg.GPLPdL.M06J1NJPIiSGmMKgZUV4M9OuaO1MmHOgAv3HcI"
 phoneSignalChannelId := "1548958253658931290"
+; BOX_INメッセージを「直近のもの」とみなす許容時間（分）。launcher.ahk側の
+; boxInFreshnessMinutesと同じ値にすること
+boxInFreshnessMinutes := 10
 
 ; Discordの指定チャンネルの最新メッセージ（id・content）を取得する。
 ; launcher.ahk側のFetchLatestDiscordMessage()の簡易版（HTTPステータス・
 ; 生の応答は返さない。詳細な診断が必要な場合はlauncher.ahk側の
 ; phone_signal_debug.logを参照すること）。
 FetchLatestDiscordMessageLocal(channelId, botToken) {
-    result := {id: "", content: ""}
+    result := {id: "", content: "", ageMinutes: 999999}
     if (channelId = "" || botToken = "")
         return result
     try {
@@ -185,38 +188,57 @@ FetchLatestDiscordMessageLocal(channelId, botToken) {
             result.id := mId[1]
         if RegExMatch(resp, '"content"\s*:\s*"(.*?)(?<!\\)"', &mContent)
             result.content := mContent[1]
+        ; Discordのtimestampは常にUTCのISO8601形式。A_NowUTCとの差（分）を
+        ; 求め、「何分前に送られたメッセージか」を判定できるようにする
+        if RegExMatch(resp, '"timestamp"\s*:\s*"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})', &mTs) {
+            msgUtc := mTs[1] mTs[2] mTs[3] mTs[4] mTs[5] mTs[6]
+            try result.ageMinutes := DateDiff(A_NowUTC, msgUtc, "Minutes")
+        }
     }
     return result
 }
 
 ; 戻り値: true=BOX_IN確認できた（またはBot未設定でこの機能自体が無効）、
 ;         false=確認できないまま時間切れ
-; 【重要】開始時点で既にチャンネルにある最新メッセージは「古いもの」として
-; 無視し、それより後に新しく届いたメッセージだけを対象にする（過去の
-; BOX_INを今回の分として誤って扱わないため）。
-WaitForPhoneBoxConfirmationLocal(timeoutSecs := 60) {
-    global phoneSignalChannelId, phoneSignalBotToken
+; 【バグ修正】以前は「待機開始"後"に届いた新着メッセージ」だけを対象に
+; していたため、待機が始まる前（例：スマホを箱に入れてから作業を始める
+; という自然な順番で行動した場合）にBOX_INを送ると、実際には送信済みなのに
+; 検知できないという不具合があった。「新着かどうか」ではなく「直近
+; boxInFreshnessMinutes分以内に送られたものかどうか」で判定する方式に
+; 変更した。これなら待機開始の前後どちらにBOX_INを送っても検知できる。
+; 待機中は既存のタイマー表示（timerGui/timerTitle/timerCount/timerSub）を
+; 流用して残り時間を表示する。
+WaitForPhoneBoxConfirmationLocal(timeoutSecs := 180) {
+    global phoneSignalChannelId, phoneSignalBotToken, boxInFreshnessMinutes
+    global timerGui, timerTitle, timerCount, timerSub
 
     if (phoneSignalChannelId = "" || phoneSignalBotToken = "")
         return true   ; 未設定の場合はこの機能自体を無効化し、従来通り素通りさせる
 
-    baseline := FetchLatestDiscordMessageLocal(phoneSignalChannelId, phoneSignalBotToken)
-    lastId := baseline.id
+    TrayTip("📱 スマホを箱に入れてください", "確認できるまで作業開始を少し待ちます（最大" Ceil(timeoutSecs / 60) "分）", "Mute")
 
-    TrayTip("📱 スマホを箱に入れてください", "確認できるまで作業開始を少し待ちます（最大" timeoutSecs "秒）", "Mute")
+    timerGui.BackColor := "4A148C"
+    timerTitle.Value   := "📱 スマホを箱に入れてください"
+    timerSub.Value     := "確認できるまで作業開始を少し待ちます"
+    timerGui.Show("NoActivate")
 
+    result := false
     deadline := A_TickCount + (timeoutSecs * 1000)
     loop {
         msg := FetchLatestDiscordMessageLocal(phoneSignalChannelId, phoneSignalBotToken)
-        if (msg.id != "" && msg.id != lastId) {
-            lastId := msg.id
-            if (InStr(msg.content, "BOX_IN"))
-                return true
+        if (msg.id != "" && InStr(msg.content, "BOX_IN") && msg.ageMinutes <= boxInFreshnessMinutes) {
+            result := true
+            break
         }
-        if (A_TickCount >= deadline)
-            return false
-        Sleep(2000)
+        rem := deadline - A_TickCount
+        if (rem <= 0)
+            break
+        s := Ceil(rem / 1000)
+        timerCount.Value := Format("{:02d}:{:02d}", s // 60, Mod(s, 60))
+        Sleep(1000)
     }
+
+    return result
 }
 
 ReportPhoneBoxMissingLocal() {
@@ -995,6 +1017,12 @@ global mealEndBtn := timerGui.Add("Button", "x73 y38 w160 h36", "⏭ 食事休�
 mealEndBtn.OnEvent("Click", OnMealEnd)
 mealEndBtn.Visible := false
 
+; 【要望】昼休みの手動終了ボタン（昼休み中のみ表示）。食事休憩と昼休みは
+; 同時に発生しないため、mealEndBtnと全く同じ座標に重ねて配置している
+global lunchEndBtn := timerGui.Add("Button", "x73 y38 w160 h36", "⏭ 昼休みを終了")
+lunchEndBtn.OnEvent("Click", OnLunchEnd)
+lunchEndBtn.Visible := false
+
 timerGui.Show("Center w305 h158 NoActivate Hide")
 
 ; トレイアイコンのダブルクリックでタイマーGUIを最前面に戻す
@@ -1040,6 +1068,8 @@ UpdateTooltip() {
         ToolTip("✅ 今日の作業完了を宣言`nサボり監視を停止し、待機モードに移行します`n押さない場合は " intermissionMinutes " 分後にセットが追加されます")
     } else if (ctrlHwnd = mealEndBtn.Hwnd) {
         ToolTip("⏭ 食事休憩を今すぐ終了して`nタイマーを再開します")
+    } else if (ctrlHwnd = lunchEndBtn.Hwnd) {
+        ToolTip("⏭ 昼休みを今すぐ終了して`nタイマーを再開します")
     } else if (ctrlHwnd = goOutBtn.Hwnd) {
         if (g.goingOut)
             ToolTip("▶ 外出モードを終了して`nタイマーを再開します")
@@ -1171,7 +1201,7 @@ OnWorkDone(btn, *) {
 ; ===== 昼休みボタン処理（変更不要）=====
 OnLunchBreak(btn, *) {
     global g, lunchBtn, lunchLogPath, lunchBreakMinutes
-    global timerGui, timerTitle, timerCount, timerSub
+    global timerGui, timerTitle, timerCount, timerSub, lunchEndBtn
 
     try FileDelete(lunchLogPath)
     FileAppend(FormatTime(, "yyyyMMdd"), lunchLogPath)
@@ -1191,6 +1221,7 @@ OnLunchBreak(btn, *) {
     timerTitle.Value   := "🥗 昼休み中"
     timerCount.Value   := Format("{:02d}:00", lunchBreakMinutes)
     timerSub.Value     := "タイマー・サボり検知を停止中"
+    lunchEndBtn.Visible := true
 
     SoundPlay("*48")
     TrayTip("昼休み開始", lunchBreakMinutes " 分後にタイマーを再開します", "Mute")
@@ -1212,6 +1243,16 @@ LunchBreakTimer() {
     mins := secs // 60
     secs := Mod(secs, 60)
     timerCount.Value := Format("{:02d}:{:02d}", mins, secs)
+}
+
+; ===== 昼休みの手動終了ボタン処理（要望・新機能）=====
+; 作業開始前のカウントダウンにある「今すぐ開始」ボタンと同じ発想で、
+; 昼休み中に押すとその場で休憩を終了し、通常の作業（ロック/休憩）に戻る。
+; タイマーが自然に0になった時（LunchBreakTimer内）と全く同じ復帰処理
+; （ResumeAfterExercise）をそのまま呼ぶだけでよい。
+OnLunchEnd(btn, *) {
+    SetTimer(LunchBreakTimer, 0)
+    ResumeAfterExercise()
 }
 
 ; ===== 集中モードボタン処理（変更不要）=====
@@ -1873,11 +1914,12 @@ ExerciseTimer() {
 }
 
 ResumeAfterExercise() {
-    global g, exerciseUnlockKey, timerGui, timerTitle, timerCount, timerSub, mealEndBtn
+    global g, exerciseUnlockKey, timerGui, timerTitle, timerCount, timerSub, mealEndBtn, lunchEndBtn
     global mealPauseEndH, mealPauseEndM
 
     g.targetTitles.Push(exerciseUnlockKey)
     g.isExercise := false
+    lunchEndBtn.Visible := false
 
     if (g.inMealPause) {
         ; 運動終了時点でまだ食事休憩中だった場合。
@@ -2057,6 +2099,14 @@ StartPomodoro(btn, *) {
     selectedSets  := setCountList[setDropdown.Value]
 
     myGui.Hide()
+
+    ; 【要望・新機能】GUIから手動でStartを押した場合も、lock_window.ahkを
+    ; 直接/autoで起動した場合と同じくスマホの箱格納確認を行う。この経路には
+    ; launcher.ahk側の確認が介在しないため、autoAlreadyConfirmedの判定は
+    ; 不要で常にチェックする。
+    if (!WaitForPhoneBoxConfirmationLocal())
+        ReportPhoneBoxMissingLocal()
+
     timerGui.Show("NoActivate")
 
     ; 手動起動もランチャーと同様にsiteList全件をブロック対象にする

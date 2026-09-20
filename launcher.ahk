@@ -1684,6 +1684,10 @@ CheckAbsence() {
 phoneSignalBotToken   := "MTU0OTI1OTM2NDE5MDEzNDMzMg.GPLPdL.M06J1NJPIiSGmMKgZUV4M9OuaO1MmHOgAv3HcI"
 phoneSignalChannelId  := "1548958253658931290"
 phoneSignalLastId     := ""   ; 前回確認済みのメッセージID（自動管理・起動時に現在の最新IDで初期化する）
+; BOX_INメッセージを「直近のもの」とみなす許容時間（分）。この分数以内に
+; 送られたBOX_INであれば、待機開始の前後どちらに送られていても検知する
+; （詳細はWaitForPhoneBoxConfirmation()内のコメント参照）
+boxInFreshnessMinutes := 10
 
 ; 起動時点で既にチャンネルにある最新メッセージを「既読」扱いにしておく
 ; （これをしないと、スクリプト起動のたびに過去の古いメッセージを
@@ -1699,7 +1703,7 @@ SetTimer(CheckPhoneSignalChannel, 15000)
 ; 取得に失敗した場合（トークン未設定・ネットワーク不通等）は
 ; id・content とも空文字を返す（呼び出し側は「新しい信号なし」として扱う）。
 FetchLatestDiscordMessage(channelId, botToken) {
-    result := {id: "", content: "", status: "", raw: ""}
+    result := {id: "", content: "", status: "", raw: "", ageMinutes: 999999}
     if (channelId = "" || botToken = "")
         return result
     try {
@@ -1721,6 +1725,12 @@ FetchLatestDiscordMessage(channelId, botToken) {
             result.id := mId[1]
         if RegExMatch(resp, '"content"\s*:\s*"(.*?)(?<!\\)"', &mContent)
             result.content := mContent[1]
+        ; Discordのtimestampは常にUTCのISO8601形式（例: "2024-01-15T12:34:56.789000+00:00"）。
+        ; A_NowUTCとの差（分）を計算し、「何分前に送られたメッセージか」を求める。
+        if RegExMatch(resp, '"timestamp"\s*:\s*"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})', &mTs) {
+            msgUtc := mTs[1] mTs[2] mTs[3] mTs[4] mTs[5] mTs[6]
+            try result.ageMinutes := DateDiff(A_NowUTC, msgUtc, "Minutes")
+        }
     } catch as e {
         result.raw := "例外: " e.Message
     }
@@ -1764,32 +1774,68 @@ CheckPhoneSignalChannel() {
 }
 
 ; 【要望・新機能】作業開始直前に呼ばれる。スマホをロック箱に入れた合図
-; （BOX_IN）が届くまで、最大 timeoutSecs 秒だけ待つ。
+; （BOX_IN）が届くまで、最大 timeoutSecs 秒だけ待つ。待機中は既存の
+; カウントダウン表示用GUI（cdGui/cdLabel/cdCount）を流用して残り時間を
+; 表示する（新しくGUIを作らず、起床待機等で使っているものと共用）。
+; 「今すぐ開始」ボタン（cdSkipBtn）はこの待機とは無関係のため、
+; 待機中だけ非表示にしておく。
 ; 戻り値: true=BOX_INを確認できた（またはこの機能自体が未設定）、
 ;         false=確認できないまま時間切れ
 ; 【重要】この待機中に届いたSABOTAGEメッセージも、取りこぼさず
 ; ProcessPhoneSignalMessage()で処理する（BOX_IN以外は無視して待ち続ける）。
-WaitForPhoneBoxConfirmation(timeoutSecs := 60) {
-    global phoneSignalLastId, phoneSignalChannelId, phoneSignalBotToken
+WaitForPhoneBoxConfirmation(timeoutSecs := 180) {
+    global phoneSignalLastId, phoneSignalChannelId, phoneSignalBotToken, boxInFreshnessMinutes
+    global cdGui, cdLabel, cdCount, cdSkipBtn
 
     if (phoneSignalChannelId = "" || phoneSignalBotToken = "")
         return true   ; 未設定の場合はこの機能自体を無効化し、従来通り素通りさせる
 
-    TrayTip("📱 スマホを箱に入れてください", "確認できるまで作業開始を少し待ちます（最大" timeoutSecs "秒）", "Mute")
+    TrayTip("📱 スマホを箱に入れてください", "確認できるまで作業開始を少し待ちます（最大" Ceil(timeoutSecs / 60) "分）", "Mute")
 
+    try cdSkipBtn.Visible := false
+    try cdLabel.Value := "📱 スマホを箱に入れてください"
+    try cdGui.Opt("+AlwaysOnTop")
+    cdGui.Show("Center w240 h120 NoActivate")
+
+    ; 【バグ修正】以前は「待機開始"後"に届いた新着メッセージ」だけを対象に
+    ; していたため、待機が始まる前（例：スマホを箱に入れてから作業を
+    ; 始めるという自然な順番で行動した場合）にBOX_INを送ると、それは
+    ; 「古いメッセージ」として無視されてしまい、実際には送信済みなのに
+    ; 検知できないという不具合があった。また、この待機とは別に常時動いている
+    ; CheckPhoneSignalChannel()（15秒ごとのSABOTAGE監視）が、待機開始前に
+    ; 同じメッセージを先に「既読」（phoneSignalLastId更新）にしてしまう
+    ; ケースもあり、二重に取りこぼしうる状態だった。
+    ; 対策として、「新着かどうか」ではなく「直近boxInFreshnessMinutes分
+    ; 以内に送られたものかどうか」で判定する方式に変更した。これなら
+    ; 待機開始の前後どちらにBOX_INを送っても、時間的に近ければ検知できる。
+    result := false
     deadline := A_TickCount + (timeoutSecs * 1000)
     loop {
         msg := FetchLatestDiscordMessage(phoneSignalChannelId, phoneSignalBotToken)
-        if (msg.id != "" && msg.id != phoneSignalLastId) {
-            phoneSignalLastId := msg.id
-            if (InStr(msg.content, "BOX_IN"))
-                return true
-            ProcessPhoneSignalMessage(msg.content)
+        if (msg.id != "") {
+            ; SABOTAGE等の処理は今まで通り「新着の時だけ」行う（二重通知防止）
+            if (msg.id != phoneSignalLastId) {
+                phoneSignalLastId := msg.id
+                if (!InStr(msg.content, "BOX_IN"))
+                    ProcessPhoneSignalMessage(msg.content)
+            }
+            ; BOX_INの検知自体は新着かどうかを問わず、直近のものであれば認める
+            if (InStr(msg.content, "BOX_IN") && msg.ageMinutes <= boxInFreshnessMinutes) {
+                result := true
+                break
+            }
         }
-        if (A_TickCount >= deadline)
-            return false
-        Sleep(2000)
+        rem := deadline - A_TickCount
+        if (rem <= 0)
+            break
+        s := Ceil(rem / 1000)
+        try cdCount.Value := Format("{:02d}:{:02d}", s // 60, Mod(s, 60))
+        Sleep(1000)
     }
+
+    cdGui.Hide()
+    try cdSkipBtn.Visible := true
+    return result
 }
 
 ; 【要望・新機能】作業開始までにスマホの箱格納確認ができなかった場合の通知。
