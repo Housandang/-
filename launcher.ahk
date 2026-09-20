@@ -1667,22 +1667,46 @@ CheckAbsence() {
 ;    【あなたに必要な設定（このスクリプトの外での作業）】
 ;      1. Discord Developer Portal (https://discord.com/developers/applications)
 ;         で新規Applicationを作成し、Botタブから Bot を追加してトークンを
-;         取得する（下記 phoneSignalBotToken に設定）
+;         取得する
 ;      2. Bot設定画面で「Message Content Intent」を必ずONにする（OFFのままだと
 ;         メッセージの中身が取得できずSABOTAGE/BOX_INの判定ができない）
 ;      3. サーバー内に専用チャンネル（他の用途と混ざらないよう新規作成推奨）を
 ;         作り、そのBotを「View Channel」「Read Message History」権限で招待する
 ;      4. Discordの「開発者モード」をON（ユーザー設定→詳細設定）にした上で、
 ;         そのチャンネルを右クリック→「チャンネルIDをコピー」
-;         （下記 phoneSignalChannelId に設定）
 ;      5. そのチャンネルに「Webhookを作成」し、URLをiPhone側のショートカット
 ;         （POSTでJSONボディ。NFCタップ用は{"content":"BOX_IN"}、
 ;         アプリを開いた時用は{"content":"SABOTAGE"}）に設定する
 ;         （送信側は既存のDiscord通知と全く同じ仕組みなので、Botは送信には
 ;         一切関与しない。Botは読み取り専用）
+;      6. トークン・チャンネルIDは、このスクリプト本体には書かず、
+;         phone_signal_secrets.txt（下記参照）に1行ずつ書く
+;
+;    【重要・トークンの管理について】
+;    以前はトークン・チャンネルIDをこのスクリプト本体に直接書いていたが、
+;    GitHub Desktop等でバージョン管理をしている場合、GitHubのシークレット
+;    スキャン機能がプッシュされたコード内のDiscordトークンを検知して
+;    自動的にDiscordへ通報し、Discord側がそのトークンを予防的に失効させて
+;    しまう（実際にこの問題で複数回トークンが無効化された）。
+;    この対策として、トークン・チャンネルIDは phoneSignalSecretsPath が
+;    指す外部ファイル（phone_signal_secrets.txt。1行目にトークン、
+;    2行目にチャンネルIDを書くだけの単純なテキストファイル）に分離した。
+;    **このファイルは絶対にGitのバージョン管理に含めないこと**
+;    （.gitignoreに phone_signal_secrets.txt を追記すること）。
+;    このファイルが存在しない・空の場合、この機能自体が自動的に無効化され
+;    （素通りする）、エラーにはならない。
 ; ================================================================
-phoneSignalBotToken   := "MTU0OTI1OTM2NDE5MDEzNDMzMg.GPLPdL.M06J1NJPIiSGmMKgZUV4M9OuaO1MmHOgAv3HcI"
-phoneSignalChannelId  := "1548958253658931290"
+phoneSignalSecretsPath := A_ScriptDir "\phone_signal_secrets.txt"
+phoneSignalBotToken    := ""
+phoneSignalChannelId   := ""
+try {
+    secretsRaw := FileRead(phoneSignalSecretsPath)
+    secretsLines := StrSplit(secretsRaw, "`n", "`r")
+    if (secretsLines.Length >= 1)
+        phoneSignalBotToken := Trim(secretsLines[1])
+    if (secretsLines.Length >= 2)
+        phoneSignalChannelId := Trim(secretsLines[2])
+}
 phoneSignalLastId     := ""   ; 前回確認済みのメッセージID（自動管理・起動時に現在の最新IDで初期化する）
 ; BOX_INメッセージを「直近のもの」とみなす許容時間（分）。この分数以内に
 ; 送られたBOX_INであれば、待機開始の前後どちらに送られていても検知する
@@ -1842,11 +1866,17 @@ WaitForPhoneBoxConfirmation(timeoutSecs := 180) {
 ; 既存の「launcher.ahk異常終了」通知等と同様、サボりの証跡として扱う。
 ; 作業自体はこの後そのまま開始する（止めてしまうと本末転倒なため）。
 ReportPhoneBoxMissing() {
-    global sabo
+    global sabo, phoneSignalChannelId, phoneSignalBotToken
     sabo.saboCount += 1
     detectedTime := FormatTime(, "HH:mm")
     sabo.entries.Push("・📱 スマホの箱格納が未確認のまま作業開始 " sabo.saboCount " 回目（" detectedTime "）")
     SendDiscord("📱⚠️ **作業開始までにスマホをロック箱に入れた確認ができませんでした（" sabo.saboCount " 回目）**`n（" detectedTime "）")
+
+    ; 【診断機能】本番の待機でも確認できなかった原因を調査できるよう、
+    ; 直近のAPI応答をログに残す（テストボタンと同じ内容）
+    debugResult := FetchLatestDiscordMessage(phoneSignalChannelId, phoneSignalBotToken)
+    debugLine := FormatTime(, "yyyy-MM-dd HH:mm:ss") " | [本番未確認] HTTPステータス: " debugResult.status " | id: " debugResult.id " | content: " debugResult.content " | ageMinutes: " debugResult.ageMinutes " | A_NowUTC: " A_NowUTC " | 生の応答: " debugResult.raw "`n"
+    try FileAppend(debugLine, A_ScriptDir "\phone_signal_debug.log")
 }
 
 ; 【要望・新機能】トレイメニュー「🧪 スマホ格納確認テスト」用のテスト実行。
@@ -1878,7 +1908,7 @@ OnTestPhoneBoxConfirmation(*) {
 
     ; 確認できなかった場合、原因調査用にもう一度APIを直接叩いて生の応答を記録する
     debugResult := FetchLatestDiscordMessage(phoneSignalChannelId, phoneSignalBotToken)
-    debugLine := FormatTime(, "yyyy-MM-dd HH:mm:ss") " | HTTPステータス: " debugResult.status " | id: " debugResult.id " | content: " debugResult.content " | 生の応答: " debugResult.raw "`n"
+    debugLine := FormatTime(, "yyyy-MM-dd HH:mm:ss") " | HTTPステータス: " debugResult.status " | id: " debugResult.id " | content: " debugResult.content " | ageMinutes: " debugResult.ageMinutes " | A_NowUTC: " A_NowUTC " | 生の応答: " debugResult.raw "`n"
     try FileAppend(debugLine, A_ScriptDir "\phone_signal_debug.log")
 
     TrayTip("🧪 スマホ格納確認テスト", "❌ BOX_IN信号は確認できませんでした（本番への影響はありません）`nphone_signal_debug.log に詳細を記録しました", "Mute")

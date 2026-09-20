@@ -151,9 +151,17 @@ SendDiscordAlert(msg) {
 ;    launcher.ahkは別プロセスでメモリを共有できないため、設定値・処理を
 ;    それぞれに個別に持たせている。
 ;
-;    【重要】下記2つの設定値は、launcher.ahk側のphoneSignalBotToken /
-;    phoneSignalChannelIdと必ず同じ値にすること（2箇所に同じ値を書く
-;    必要がある。片方だけ更新すると食い違って動かなくなる）。
+;    【重要・トークンの管理について】以前はトークン・チャンネルIDをこの
+;    スクリプト本体に直接書いていたが、GitHub Desktop等でバージョン管理を
+;    している場合、GitHubのシークレットスキャン機能がプッシュされた
+;    コード内のDiscordトークンを検知して自動的にDiscordへ通報し、
+;    Discord側がそのトークンを予防的に失効させてしまう（実際にこの問題で
+;    複数回トークンが無効化された）。この対策として、launcher.ahk側と
+;    全く同じ phone_signal_secrets.txt（1行目にトークン、2行目に
+;    チャンネルID）から読み込む方式に変更した。**このファイルは絶対に
+;    Gitのバージョン管理に含めないこと**（.gitignoreに追記すること）。
+;    launcher.ahk側と同じファイルを見に行くため、2箇所に同じ値を書く
+;    必要はなくなった（ファイルを1つ更新するだけで両方に反映される）。
 ;
 ;    この確認は、launcher.ahk経由の自動起動では実行されない
 ;    （launcher.ahk側で既に確認済みのため、"/auto:confirmed"引数で
@@ -161,8 +169,17 @@ SendDiscordAlert(msg) {
 ;    直接"/auto"で起動した場合（autoAlreadyConfirmed=false）にのみ、
 ;    ここで改めてBOX_IN確認を行う。
 ; ================================================================
-phoneSignalBotToken  := "MTU0OTI1OTM2NDE5MDEzNDMzMg.GPLPdL.M06J1NJPIiSGmMKgZUV4M9OuaO1MmHOgAv3HcI"
-phoneSignalChannelId := "1548958253658931290"
+phoneSignalSecretsPath := A_ScriptDir "\phone_signal_secrets.txt"
+phoneSignalBotToken    := ""
+phoneSignalChannelId   := ""
+try {
+    secretsRaw := FileRead(phoneSignalSecretsPath)
+    secretsLines := StrSplit(secretsRaw, "`n", "`r")
+    if (secretsLines.Length >= 1)
+        phoneSignalBotToken := Trim(secretsLines[1])
+    if (secretsLines.Length >= 2)
+        phoneSignalChannelId := Trim(secretsLines[2])
+}
 ; BOX_INメッセージを「直近のもの」とみなす許容時間（分）。launcher.ahk側の
 ; boxInFreshnessMinutesと同じ値にすること
 boxInFreshnessMinutes := 10

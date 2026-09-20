@@ -1,3 +1,5 @@
 2026-09-15 12:57:15 | HTTPステータス: 403 | id:  | content:  | 生の応答: {"message": "internal network error", "code": 40333}
 2026-09-15 13:00:28 | HTTPステータス: 200 | id: 1549267816388239382 | content: BOX_IN | 生の応答: [{"type":0,"content":"BOX_IN","mentions":[],"mention_roles":[],"attachments":[],"embeds":[],"timestamp":"2026-09-15T03:57:11.431000+00:00","edited_timestamp":null,"flags":0,"components":[],"id":"1549267816388239382","channel_id":"1548958253658931290","author":{"id":"1548958276497182760","username":"\u30ed\u30c3\u30af\u76e3\u8996bot","avatar":null,"discriminator":"0000","public_flags":0,"flags":0,"bot":true,"global_name":null,"clan":null,"primary_guild":null},"pinned":false,"mention_everyone":false,"tts":false,"webhook_id":"1548958276497182760"}]
 
+2026-09-20 12:12:12 | HTTPステータス: 401 | id:  | content:  | 生の応答: {"message": "401: Unauthorized", "code": 0}
+2026-09-20 12:13:26 | HTTPステータス: 401 | id:  | content:  | ageMinutes: 999999 | A_NowUTC: 20260920031326 | 生の応答: {"message": "401: Unauthorized", "code": 0}
