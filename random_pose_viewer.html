@@ -1,0 +1,90 @@
+﻿<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<style>
+html, body { margin:0; padding:0; background:#000; overflow:hidden; width:100%; height:100%; }
+#ref { position:absolute; display:none; -ms-user-select:none; user-select:none; }
+body { cursor:move; }
+</style>
+<script>
+var zoom = 1;
+var panX = 0;
+var panY = 0;
+var dragging = false;
+var dragStartX = 0, dragStartY = 0, panStartX = 0, panStartY = 0;
+
+function render() {
+    var img = document.getElementById('ref');
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    var ww = document.documentElement.clientWidth;
+    var wh = document.documentElement.clientHeight;
+    var scale = Math.min(ww / img.naturalWidth, wh / img.naturalHeight) * zoom;
+    var dw = Math.round(img.naturalWidth * scale);
+    var dh = Math.round(img.naturalHeight * scale);
+    img.style.width  = dw + 'px';
+    img.style.height = dh + 'px';
+    img.style.left = Math.round((ww - dw) / 2 + panX) + 'px';
+    img.style.top  = Math.round((wh - dh) / 2 + panY) + 'px';
+    img.style.display = 'block';
+}
+function setImage(path) {
+    var img = document.getElementById('ref');
+    img.style.display = 'none';
+    zoom = 1;
+    panX = 0;
+    panY = 0;
+    img.onload = render;
+    img.src = path;
+}
+window.onresize = render;
+
+function handleWheel(e) {
+    e = e || window.event;
+    var delta = 0;
+    if (typeof e.deltaY !== 'undefined') delta = -e.deltaY;
+    else if (typeof e.wheelDelta !== 'undefined') delta = e.wheelDelta;
+    else if (typeof e.detail !== 'undefined') delta = -e.detail;
+    if (delta > 0) zoom = zoom * 1.1;
+    else if (delta < 0) zoom = zoom / 1.1;
+    if (zoom < 0.1) zoom = 0.1;
+    if (zoom > 10) zoom = 10;
+    render();
+    if (e.preventDefault) e.preventDefault();
+    if (typeof e.returnValue !== 'undefined') e.returnValue = false;
+    return false;
+}
+if (document.addEventListener) {
+    document.addEventListener('wheel', handleWheel, false);
+    document.addEventListener('mousewheel', handleWheel, false);
+} else if (document.attachEvent) {
+    document.attachEvent('onmousewheel', handleWheel);
+}
+document.onwheel = handleWheel;
+document.onmousewheel = handleWheel;
+
+document.onmousedown = function(e) {
+    e = e || window.event;
+    if (e.button !== 0) return;
+    dragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    panStartX = panX;
+    panStartY = panY;
+    return false;
+};
+document.onmousemove = function(e) {
+    if (!dragging) return;
+    e = e || window.event;
+    panX = panStartX + (e.clientX - dragStartX);
+    panY = panStartY + (e.clientY - dragStartY);
+    render();
+};
+document.onmouseup = function(e) {
+    dragging = false;
+};
+document.ondragstart = function() { return false; };
+document.oncontextmenu = function() { return false; };
+</script>
+</head>
+<body><img id="ref" alt=""></body>
+</html>

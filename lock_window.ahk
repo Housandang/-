@@ -2159,8 +2159,12 @@ PickNextCroquisImage() {
     exts    := ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]
     allImgs := []
     for ext in exts {
-        loop files folder "\" ext
-            allImgs.Push(A_LoopFileName)
+        ; "R"でサブフォルダも再帰的に検索する（要望によりコンセプトごとに
+        ; サブフォルダで整理できるようにした）。同名ファイルが別々の
+        ; サブフォルダに存在する可能性があるため、folderからの相対パス
+        ; （サブフォルダ名を含む）を識別子として扱う
+        loop files folder "\" ext, "R"
+            allImgs.Push(SubStr(A_LoopFileFullPath, StrLen(folder) + 2))
     }
     if (allImgs.Length = 0)
         return ""
@@ -2648,8 +2652,11 @@ PickFastCroquisImage() {
     exts    := ["*.jpg", "*.jpeg", "*.png", "*.bmp"]
     allImgs := []
     for ext in exts {
-        loop files fastCroquisFolder "\" ext
-            allImgs.Push(A_LoopFileName)
+        ; "R"でサブフォルダも再帰的に検索する。同名ファイルが別々の
+        ; サブフォルダに存在する可能性があるため、fastCroquisFolderからの
+        ; 相対パス（サブフォルダ名を含む）を識別子として扱う
+        loop files fastCroquisFolder "\" ext, "R"
+            allImgs.Push(SubStr(A_LoopFileFullPath, StrLen(fastCroquisFolder) + 2))
     }
     if (allImgs.Length = 0)
         return ""

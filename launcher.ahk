@@ -1164,11 +1164,15 @@ PickCroquisImage(mode) {
     ; 対象拡張子
     exts := ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"]
 
-    ; フォルダ内の全画像を列挙
+    ; フォルダ内の全画像を列挙（"R"でサブフォルダも再帰的に検索する。要望により
+    ; コンセプトごとにサブフォルダで整理できるようにした）。同名ファイルが
+    ; 別々のサブフォルダに存在する可能性があるため、ファイル名だけでなく
+    ; folderからの相対パス（サブフォルダ名を含む）を識別子として扱う
     allImages := []
     for ext in exts {
-        loop files folder "\" ext {
-            allImages.Push(A_LoopFileName)
+        loop files folder "\" ext, "R" {
+            relPath := SubStr(A_LoopFileFullPath, StrLen(folder) + 2)
+            allImages.Push(relPath)
         }
     }
 
