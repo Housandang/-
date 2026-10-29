@@ -940,6 +940,9 @@ global g := {
     focusMode:            false,  ; 集中モード中かどうか
     focusModeIsAuto:      false,  ; true=自動発動 / false=手動発動
     lastSetHadFocusMode:  false,  ; 直前に完了したセットが集中モードだったか（自動抽選の連続発動防止用）
+    setGoal:              "",     ; 【要望】現在の作業セットの目標（空文字＝未入力）
+    setStartNow:          "",     ; 【要望】現在の作業セットのロック開始時刻（A_Now形式。保存されたキャンバス判定に使う）
+    audioLockActive:      false,  ; 【要望】通常の作業セットのロック中か（音声の強制ミュート対象かどうか）
     intermissionEnd:      0,      ; 中休みモード終了のTickCount
     focusCountdownEnd:    0,      ; 集中モード猶予カウントダウン用
     focusCountingDown:    false,  ; カウントダウン中はブロックを一時停止
@@ -988,7 +991,8 @@ global timerTitle := timerGui.Add("Text", "w295 Center cWhite",     "")
 timerGui.SetFont("s28 bold", "Segoe UI")
 global timerCount := timerGui.Add("Text", "w295 Center cWhite y+5", "00:00")
 timerGui.SetFont("s10", "Segoe UI")
-global timerSub   := timerGui.Add("Text", "w295 Center cWhite y+5", "")
+; 【要望】サブ行にセット目標を表示するため、1行固定＋はみ出しは「…」で省略（SS_ENDELLIPSIS=0x4000）
+global timerSub   := timerGui.Add("Text", "w295 Center cWhite y+5 r1 +0x4000", "")
 
 ; ================================================================
 ; ★ コンパクトボタン行（変更不要）
@@ -1087,6 +1091,8 @@ UpdateTooltip() {
         ToolTip("⏭ 食事休憩を今すぐ終了して`nタイマーを再開します")
     } else if (ctrlHwnd = lunchEndBtn.Hwnd) {
         ToolTip("⏭ 昼休みを今すぐ終了して`nタイマーを再開します")
+    } else if (ctrlHwnd = timerSub.Hwnd && g.phase = "lock" && g.setGoal != "") {
+        ToolTip("🎯 このセットの目標`n" g.setGoal)
     } else if (ctrlHwnd = goOutBtn.Hwnd) {
         if (g.goingOut)
             ToolTip("▶ 外出モードを終了して`nタイマーを再開します")
@@ -1118,13 +1124,191 @@ OnAddSet(btn, *) {
 
     if (!g.inMealPause && !g.isExercise) {
         if (g.phase = "lock")
-            timerTitle.Value := "🔒 Lock  -  Set " g.currentSet "/" g.totalSets
+            timerTitle.Value := LockTitle(g.currentSet)
         else if (g.phase = "break")
             timerTitle.Value := "☕ Break  -  Set " g.currentSet "/" g.totalSets
     }
 }
 
 
+
+; ================================================================
+; 【要望】セット終了時の進捗プレビュー保存 ＆ ロック中の強制ミュート
+; ================================================================
+; ■ 進捗プレビュー
+;   通常の作業セットが終わって休憩に入ると、まず clipSaveGraceSecs 秒間
+;   「保存してください」を表示し、その後、そのセット中に更新された .clip を
+;   clipFolders から探して、埋め込みプレビュー画像を set_previews\日付\ に保存する。
+;   結果は set_log.txt に1セット1行で追記され、launcher.ahk が毎日22時に
+;   まとめてDiscordへ投稿する（画像は最新10枚まで）。
+;   ・clipFolders が空のときは画像なしで目標だけを記録する
+;   ・更新された .clip が見つからなければ「保存なし」として記録する
+;   ・プレビュー取り出しは Python（clip_preview.py）で行う。pythonCmd で起動方法を変更できる
+clipFolders       := [C:\CLIPWORKING]   ; 例: ["D:\Manga\2026", "C:\Users\name\Documents\CLIPStudio"]（サブフォルダも検索）
+clipSaveGraceSecs := 30   ; 休憩に入ってから、保存するために待つ秒数
+pythonCmd         := "py -3"
+setPreviewDir     := A_ScriptDir "\set_previews"
+setLogPath        := A_ScriptDir "\set_log.txt"
+previewJob        := ""
+
+; ■ ロック中の強制ミュート（通常の作業セットのみ。クロッキーは対象外）
+;   ロック中は audioExemptProcesses 以外の全アプリの音を自動でミュートし続ける。
+;   切り替えボタンは意図的に用意しない（休憩に入ると自動で元に戻る）。
+;   audio_lock.py が必要（pip install pycaw）。
+audioLockEnabled     := true
+audioExemptProcesses := ["Spotify.exe"]
+audioLockStatePath   := A_ScriptDir "\audio_lock_state.json"
+audioLockPid         := 0
+audioLockFailed      := false
+
+AudioLockSync() {
+    global g, audioLockEnabled, audioLockPid, audioLockFailed
+    want := audioLockEnabled && g.audioLockActive && g.phase = "lock" && !g.isPaused
+    if (!want) {
+        audioLockFailed := false
+        if (audioLockPid)
+            AudioLockStop()
+        return
+    }
+    if (audioLockFailed)
+        return
+    if (audioLockPid && ProcessExist(audioLockPid))
+        return
+    if (audioLockPid) {
+        ; 起動したはずのヘルパーが居なくなっている（pycaw未インストールなど）
+        audioLockPid    := 0
+        audioLockFailed := true
+        AudioLockRestore()
+        TrayTip("⚠️ 音声ミュートが動いていません", "audio_lock_error.log を確認してください（pip install pycaw が必要です）", "Mute")
+        return
+    }
+    AudioLockStart()
+}
+
+AudioLockStart() {
+    global audioLockPid, audioLockFailed, pythonCmd, audioExemptProcesses
+    exempt := ""
+    for name in audioExemptProcesses
+        exempt .= (exempt = "" ? "" : ",") name
+    cmd := pythonCmd ' "' A_ScriptDir '\audio_lock.py" run --exempt "' exempt '" --parent-pid ' ProcessExist()
+    try {
+        Run(cmd, A_ScriptDir, "Hide", &pid)
+        audioLockPid := pid
+    } catch {
+        audioLockPid    := 0
+        audioLockFailed := true
+        TrayTip("⚠️ 音声ミュートを開始できません", "Pythonの起動に失敗しました（pythonCmd の設定を確認してください）", "Mute")
+    }
+}
+
+; ヘルパーを止めて、ミュートしたアプリを元に戻す。
+; py.exe 経由だと子プロセスが残るため、プロセスツリーごと終了してから restore を実行する。
+AudioLockStop() {
+    global audioLockPid
+    pid := audioLockPid
+    audioLockPid := 0
+    if (pid) {
+        try RunWait("taskkill /PID " pid " /T /F",, "Hide")
+    }
+    AudioLockRestore()
+}
+
+AudioLockRestore() {
+    global pythonCmd, audioLockStatePath
+    if (!FileExist(audioLockStatePath))
+        return
+    try RunWait(pythonCmd ' "' A_ScriptDir '\audio_lock.py" restore', A_ScriptDir, "Hide")
+}
+
+AudioLockCleanup(reason, code) {
+    global audioLockPid
+    if (audioLockPid)
+        AudioLockStop()
+    else
+        AudioLockRestore()
+}
+
+; 起動時：前回の異常終了でミュートが残っていれば元に戻す。以降2秒ごとに状態を同期する
+AudioLockRestore()
+OnExit(AudioLockCleanup)
+SetTimer(AudioLockSync, 2000)
+
+; ===== セット終了時のプレビュー保存（変更不要）=====
+; 休憩開始時に呼ぶ。保存猶予のカウントダウンを出したあと FinalizeSetPreview() で記録する
+BeginSetPreviewCapture(setNum) {
+    global g, previewJob, clipSaveGraceSecs
+    previewJob := { setNum: setNum, total: g.totalSets, goal: g.setGoal, start: g.setStartNow, endTick: A_TickCount + clipSaveGraceSecs * 1000 }
+    SetTimer(PreviewSaveTick, 500)
+}
+
+PreviewSaveTick() {
+    global g, previewJob, timerSub
+    if (!IsObject(previewJob)) {
+        SetTimer(PreviewSaveTick, 0)
+        return
+    }
+    remaining := previewJob.endTick - A_TickCount
+    if (remaining > 0 && g.phase = "break") {
+        try timerSub.Value := "💾 保存してください（あと " Ceil(remaining / 1000) " 秒）"
+        return
+    }
+    SetTimer(PreviewSaveTick, 0)
+    job := previewJob
+    previewJob := ""
+    if (g.phase = "break") {
+        try timerSub.Value := g.focusMode ? "enjoy your break!  🎯 ON" : "enjoy your break!"
+    }
+    FinalizeSetPreview(job)
+}
+
+FinalizeSetPreview(job) {
+    global clipFolders, pythonCmd, setPreviewDir, setLogPath
+    status      := "ok"
+    previewPath := ""
+    best        := ""
+    if (clipFolders.Length = 0) {
+        status := "nofolder"
+    } else {
+        ; ロック開始以降に更新された .clip のうち、最も新しいものを使う
+        bestTime := job.start
+        for dir in clipFolders {
+            try {
+                Loop Files RTrim(dir, "\") "\*.clip", "R" {
+                    if (A_LoopFileTimeModified >= bestTime) {
+                        bestTime := A_LoopFileTimeModified
+                        best     := A_LoopFileFullPath
+                    }
+                }
+            }
+        }
+        if (best = "") {
+            status := "nosave"
+        } else {
+            dayDir      := setPreviewDir "\" FormatTime(, "yyyyMMdd")
+            previewPath := dayDir "\" FormatTime(, "HHmmss") "_set" job.setNum ".png"
+            try {
+                DirCreate(dayDir)
+                code := RunWait(pythonCmd ' "' A_ScriptDir '\clip_preview.py" "' best '" "' previewPath '"', A_ScriptDir, "Hide")
+                if (code != 0 || !FileExist(previewPath)) {
+                    status      := "error"
+                    previewPath := ""
+                }
+            } catch {
+                status      := "error"
+                previewPath := ""
+            }
+        }
+    }
+
+    goal := StrReplace(StrReplace(StrReplace(job.goal, "`t", " "), "`r", " "), "`n", " ")
+    line := FormatTime(, "yyyyMMddHHmmss") "`t" job.setNum "`t" job.total "`t" status "`t" previewPath "`t" goal "`t" best "`n"
+    try FileAppend(line, setLogPath, "UTF-8")
+
+    if (status = "nosave")
+        TrayTip("⚠️ 保存されたキャンバスなし", "Set " job.setNum " の間に更新された .clip が見つかりません（22時の報告に「保存なし」と記録されます）", "Mute")
+    else if (status = "error")
+        TrayTip("⚠️ プレビュー取得に失敗", "clip_preview.py の実行に失敗しました（22時の報告に「取得失敗」と記録されます）", "Mute")
+}
 
 ; ===== 作業中ウィンドウ判定（変更不要）=====
 IsWorkWindow() {
@@ -1391,9 +1575,10 @@ FocusCountdownTick() {
         g.focusCountingDown := false   ; ブロック再開
         if (g.focusMode)
             FocusModeMinimize()
-        if (g.phase = "lock")
-            timerSub.Value := "remaining time  🎯"
-        else if (g.phase = "break")
+        if (g.phase = "lock") {
+            timerTitle.Value := LockTitle(g.currentSet)   ; 🎯はタイトル行に表示
+            timerSub.Value   := LockSubText()
+        } else if (g.phase = "break")
             timerSub.Value := "enjoy your break!  🎯 ON"
         return
     }
@@ -1958,8 +2143,8 @@ ResumeAfterExercise() {
 
         if (g.phase = "lock") {
             timerGui.BackColor := "CC3333"
-            timerTitle.Value   := "🔒 Lock  -  Set " g.currentSet "/" g.totalSets
-            timerSub.Value     := "remaining time"
+            timerTitle.Value   := LockTitle(g.currentSet)
+            timerSub.Value     := LockSubText()
         } else {
             timerGui.BackColor := "2E7D32"
             timerTitle.Value   := "☕ Break  -  Set " g.currentSet "/" g.totalSets
@@ -3416,6 +3601,47 @@ StartCroquisBreak() {
     }
 }
 
+; ===== 【要望】セット目標：ロック中のタイトル／サブ行の文字列 =====
+; 集中モードの🎯はサブ行からタイトル行へ移した（サブ行を目標表示に使うため）
+LockTitle(setNum) {
+    global g
+    return "🔒 Lock  -  Set " setNum "/" g.totalSets (g.focusMode ? "  🎯" : "")
+}
+
+LockSubText() {
+    global g
+    return (g.setGoal != "") ? g.setGoal : "remaining time"
+}
+
+; ===== 【要望】セット開始前の目標入力 =====
+; EnterかOKで確定。空欄・キャンセル・60秒無操作は「目標なし」で開始する
+; （離席中にタイマーが止まったままにならないようにするため）
+PromptSetGoal(setNum) {
+    global g, timerTitle, timerSub
+    g.setGoal := ""
+    try {
+        timerTitle.Value := "✏️ Set " setNum "/" g.totalSets " の目標"
+        timerSub.Value   := "入力後にロックを開始します"
+    }
+    SetTimer(PromptGoalTop, 100)   ; 入力ウィンドウが出たら最前面化（見つかるまで繰り返す）
+    ib := InputBox("このセットで達成する目標を入力してください`n（空欄で目標なし／60秒で自動開始）", "Set " setNum "/" g.totalSets " の目標", "w380 h150 T60")
+    SetTimer(PromptGoalTop, 0)
+    if (ib.Result = "OK") {
+        goal := Trim(StrReplace(StrReplace(ib.Value, "`r", " "), "`n", " "))
+        g.setGoal := goal
+    }
+}
+
+PromptGoalTop() {
+    if (WinExist("ahk_class #32770", "目標を入力")) {
+        SetTimer(PromptGoalTop, 0)
+        try {
+            WinSetAlwaysOnTop(1, "ahk_class #32770", "目標を入力")
+            WinActivate("ahk_class #32770", "目標を入力")
+        }
+    }
+}
+
 ; ===== ポモドーロ本体（変更不要）=====
 RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
     global g, timerGui, timerTitle, timerCount, timerSub
@@ -3434,8 +3660,16 @@ RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
             return
         }
 
+        ; 【要望】セット開始前に目標を入力する。入力中はまだロックを開始しない
+        ; （endTickは入力後に設定するため、入力にかけた時間はロック時間に含まれない）
+        PromptSetGoal(currentSet)
+        if (g.generation != myGen)   ; 入力中に別のRunPomodoroが走った場合は中断
+            return
+
         g.currentSet      := currentSet
         g.phase           := "lock"
+        g.setStartNow     := A_Now          ; 保存されたキャンバスの判定に使う
+        g.audioLockActive := true           ; ロック中の強制ミュート対象（AudioLockSync が反映）
         g.lastActiveCheck := 0   ; 作業時間計測をリセット
         g.endTick    := A_TickCount + (lockSecs * 1000)
         g.isPaused   := false
@@ -3469,8 +3703,8 @@ RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
         timerTitle.SetFont("cWhite")
         timerCount.SetFont("cWhite")
         timerSub.SetFont("cWhite")
-        timerTitle.Value := "🔒 Lock  -  Set " currentSet "/" g.totalSets
-        timerSub.Value   := g.focusMode ? "remaining time  🎯" : "remaining time"
+        timerTitle.Value := LockTitle(currentSet)
+        timerSub.Value   := LockSubText()
         SoundPlay("*48")
         TrayTip("Lock [Set " currentSet "/" g.totalSets "]", lockSecs // 60 " min lock started", "Mute")
         UpdateFocusBtnState()
@@ -3582,6 +3816,9 @@ RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
             UpdateFocusBtnState()
             FocusModeRestore()
             SetTimer(BreakTimer, 300)
+
+            g.audioLockActive := false      ; 強制ミュートは休憩で解除（AudioLockSync が2秒以内に元へ戻す）
+            BeginSetPreviewCapture(currentSet)
         }
 
         BreakTimer() {

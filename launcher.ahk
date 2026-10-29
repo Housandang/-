@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 Persistent
 
@@ -261,6 +261,30 @@ croquisReportWDay    := 7    ; 土曜
 croquisReportHour    := 15   ; 15時
 
 ; ================================================================
+; ★ 【要望】毎日の作業報告（セット目標＋プレビュー画像）の設定
+;
+;    lock_window.ahk が通常の作業セットを終えるたびに set_log.txt へ
+;    「目標・保存状況・プレビュー画像のパス」を1行追記する。
+;    launcher.ahk は毎日 setReportHour 時に、前回報告以降の分を
+;    1つのメッセージにまとめてDiscordへ投稿する（画像は最新10枚まで）。
+;    PCが22時に起きていなかった場合は、次に起動したときに投稿する。
+;
+;    setReportHour    → 投稿する時刻（時・24時間表記）
+;    setReportWebhook → 投稿先（既定はクロッキー週次レポートと同じ）
+; ================================================================
+setReportHour       := 22
+setReportWebhook    := "https://discord.com/api/webhooks/1514960540949282948/QWx9sLWEDVBct8MUXU5EvsgiGKcY5C3BRriVil5Ye_yM2hvCKJPfFdI-MryZNVmhDXBS?thread_id=1481303569721462824"
+setLogPath          := A_ScriptDir "\set_log.txt"
+setReportStatePath  := A_ScriptDir "\set_report_state.txt"
+setReportResultLog  := A_ScriptDir "\set_report_log.txt"
+setReportLastTry    := 0
+
+; ★ 【要望】PC起動・スリープ復帰時のデイリールーティンの一時停止フラグ
+;    （トレイメニューで切り替え。ファイルで保持するので再起動後も維持される）
+routinePausedFlagPath := A_ScriptDir "\routine_paused_flag.txt"
+routinePaused         := FileExist(routinePausedFlagPath) ? true : false
+
+; ================================================================
 ; ★ 就寝時スマホブロックの設定
 ;
 ;    nightBlockDelay … 就寝モード開始（トレイメニュー操作）から
@@ -300,7 +324,7 @@ nightBlockFlagPath := A_ScriptDir "\night_block_flag.txt"
 ; ===== トレイアイコン設定（変更不要）=====
 ; スリープ復帰後、タスクバーのこのアイコンにマウスを乗せると
 ; 「作業開始まで XX:XX」という残り時間が常に表示されます。
-A_IconTip := "Work Launcher - 待機中"
+A_IconTip := IdleTipText()
 
 ; ===== 就寝モード状態（変更不要）=====
 nightModeActive  := false
@@ -336,6 +360,10 @@ trayMenu.Add("🔁 スリープ解除ルーティンを手動実行 (" delayMinu
 trayMenu.Add("🧪 右脳ドローイング（テスト実行）", OnFastCroquisTest)
 trayMenu.Add("🧪 スマホ格納確認テスト", OnTestPhoneBoxConfirmation)
 trayMenu.Add("🚫 本日のクロッキーをスキップ（代わりに軽量版を実行）", OnToggleSkipCroquis)
+trayMenu.Add("⏸ 起動時のデイリールーティンを停止（常駐のみ）", OnToggleRoutinePaused)
+trayMenu.Add("🧪 作業報告を今すぐ送信（テスト）", OnTestSetReport)
+if (routinePaused)
+    trayMenu.Check("⏸ 起動時のデイリールーティンを停止（常駐のみ）")
 
 ; ===== 本日のクロッキーをスキップ（変更不要）=====
 ; トレイメニューでいつでもON/OFFを切り替えられる。ONの間は LaunchCroquis() が
@@ -397,7 +425,7 @@ OnNightModeCancel(*) {
     }
     nightModeActive := false
     SetTimer(NightModeCountdown, 0)
-    A_IconTip := "Work Launcher - 待機中"
+    A_IconTip := IdleTipText()
     TrayTip("就寝モードキャンセル", "スマホブロックをキャンセルしました", "Mute")
 }
 
@@ -411,7 +439,7 @@ NightModeCountdown() {
     if remaining <= 0 {
         SetTimer(NightModeCountdown, 0)
         nightModeActive := false
-        A_IconTip := "Work Launcher - 待機中"
+        A_IconTip := IdleTipText()
         ; スマホブロックを実行
         NightBlock()
         return
@@ -461,12 +489,12 @@ countdownMode := ""   ; "croquis" or "main"
 wakeRoutineActive := false   ; 待機→クロッキー→作業のルーティンが進行中か（手動実行との二重起動防止用）
 
 OnPower(wParam, lParam, msg, hwnd) {
-    global countdownEnd, showAttempts, sleepLogPath, minSleepHours, delayMinutes, skipWDays, wakeRoutineActive
+    global countdownEnd, showAttempts, sleepLogPath, minSleepHours, delayMinutes, skipWDays, wakeRoutineActive, routinePaused
 
     ; スリープ開始時刻を保存
     ; ただし直前の記録から30分未満の場合は上書きしない（短時間スリープ対策）
     if (wParam = PBT_APMSUSPEND) {
-        A_IconTip := "Work Launcher - 待機中"
+        A_IconTip := IdleTipText()
         shouldWrite := true
         ; 【バグ修正】以前はここを生のFileRead/FileAppend/FileDeleteで
         ; 読み書きしていた。スクリプトのリロード時は#SingleInstance Forceの
@@ -497,6 +525,8 @@ OnPower(wParam, lParam, msg, hwnd) {
 
     if (wParam = PBT_APMRESUMEAUTOMATIC) {
         if (wakeRoutineActive)   ; 既にルーティン進行中なら何もしない（多重発火対策）
+            return
+        if (routinePaused)       ; 【要望】トレイメニューで停止中なら自動ルーティンは行わない
             return
 
         ; スキップ曜日チェック
@@ -690,7 +720,7 @@ longIdleDetected := false
 SetTimer(CheckLongIdleWake, 60000)   ; 1分ごとに監視
 
 CheckLongIdleWake() {
-    global longIdleDetected, minSleepHours, wakeRoutineActive, skipWDays, phaseFile
+    global longIdleDetected, minSleepHours, wakeRoutineActive, skipWDays, phaseFile, routinePaused
 
     idleMs      := A_TimeIdlePhysical
     thresholdMs := minSleepHours * 60 * 60 * 1000
@@ -709,6 +739,8 @@ CheckLongIdleWake() {
 
     if (wakeRoutineActive)
         return   ; 既にルーティン進行中（実際のスリープ復帰等）なら何もしない
+    if (routinePaused)
+        return   ; 【要望】トレイメニューで停止中なら自動ルーティンは行わない
 
     ; lock_window.ahk が既に動作中なら何もしない
     phaseNow := ""
@@ -752,7 +784,7 @@ UpdateCountdown() {
         SetTimer(UpdateCountdown, 0)
         SetTimer(TryShowGui, 0)
         cdGui.Hide()
-        A_IconTip := "Work Launcher - 待機中"
+        A_IconTip := IdleTipText()
         if (countdownMode = "main") {
             ; 食事時間内ならクロッキーを食事休憩終了まで延期
             if (IsMealTime()) {
@@ -817,6 +849,246 @@ ScheduleDailyLog()
 
 ; 起動時にクロッキー週次レポートタイマーをセット
 ScheduleCroquisReport()
+
+; ===== 【要望】デイリールーティンの一時停止（トレイメニュー）=====
+; ON の間は、スリープ復帰（OnPower）・長時間無操作からの復帰（CheckLongIdleWake）による
+; 自動のルーティン開始（待機→クロッキー→作業）だけを行わない。
+; Discord通知・22時の作業報告・就寝ブロックなど、常駐の機能はそのまま動く。
+; 手動実行（「スリープ解除ルーティンを手動実行」）は停止中でも使える。
+; ON/OFFはファイル（routine_paused_flag.txt）で保持され、再起動後も維持される。
+OnToggleRoutinePaused(*) {
+    global routinePaused, routinePausedFlagPath, trayMenu
+    routinePaused := !routinePaused
+    if (routinePaused) {
+        SafeWriteFile(routinePausedFlagPath, "1")
+        trayMenu.Check("⏸ 起動時のデイリールーティンを停止（常駐のみ）")
+        TrayTip("⏸ ルーティン停止", "スリープ復帰時のデイリールーティンを行いません（もう一度クリックで再開）", "Mute")
+    } else {
+        SafeDeleteFile(routinePausedFlagPath)
+        trayMenu.Uncheck("⏸ 起動時のデイリールーティンを停止（常駐のみ）")
+        TrayTip("▶ ルーティン再開", "次回のスリープ復帰から、通常どおりデイリールーティンを行います", "Mute")
+    }
+    A_IconTip := IdleTipText()
+}
+
+IdleTipText() {
+    global routinePaused
+    return "Work Launcher - 待機中" (routinePaused ? "｜⏸ ルーティン停止中" : "")
+}
+
+; ===== 【要望】毎日の作業報告（セット目標＋プレビュー画像）=====
+SetTimer(CheckSetReport, 60000)          ; 1分ごとに「報告の時刻を過ぎたか」を確認
+SetTimer(CheckSetReportFirst, -8000)     ; 起動直後にも1回確認（22時にPCが起きていなかった場合の取り戻し）
+
+CheckSetReportFirst() {
+    CheckSetReport()
+}
+
+CheckSetReport() {
+    global setReportHour, setReportLastTry
+    now      := A_Now
+    boundary := FormatTime(now, "yyyyMMdd") Format("{:02d}0000", setReportHour)
+    if (now < boundary)
+        boundary := FormatTime(DateAdd(now, -1, "Days"), "yyyyMMdd") Format("{:02d}0000", setReportHour)
+
+    st := ReadSetReportState()
+    if (!st.exists) {
+        ; 初回：過去の分をまとめて送ってしまわないよう、今回の区切りを基準として記録するだけにする
+        WriteSetReportState(boundary, "0")
+        return
+    }
+    if (st.boundary >= boundary)
+        return                                   ; この区切りの分は処理済み
+    if (setReportLastTry != 0 && A_TickCount - setReportLastTry < 600000)
+        return                                   ; 失敗時の再試行は10分おき
+    setReportLastTry := A_TickCount
+    SendSetReport(boundary, st, false)
+}
+
+ReadSetReportState() {
+    global setReportStatePath
+    st := { boundary: "0", lastTs: "0", exists: false }
+    if (!FileExist(setReportStatePath))
+        return st
+    st.exists := true
+    for line in StrSplit(SafeReadFile(setReportStatePath), "`n", "`r") {
+        if RegExMatch(line, "^boundary=(\d+)$", &m)
+            st.boundary := m[1]
+        else if RegExMatch(line, "^lastTs=(\d+)$", &m)
+            st.lastTs := m[1]
+    }
+    return st
+}
+
+WriteSetReportState(boundary, lastTs) {
+    global setReportStatePath
+    SafeWriteFile(setReportStatePath, "boundary=" boundary "`nlastTs=" lastTs "`n")
+}
+
+; set_log.txt（タブ区切り: 時刻, セット番号, 総セット数, 状態, 画像パス, 目標, 元ファイル）から
+; sinceTs より新しい行を取り出す
+ParseSetLog(sinceTs) {
+    global setLogPath
+    entries := []
+    txt := ""
+    if (FileExist(setLogPath))
+        txt := SafeReadFile(setLogPath)
+    for line in StrSplit(txt, "`n", "`r") {
+        if (line = "")
+            continue
+        f := StrSplit(line, "`t")
+        if (f.Length < 6)
+            continue
+        if !(f[1] > sinceTs)
+            continue
+        entries.Push({ ts: f[1], setNum: f[2], total: f[3], status: f[4], preview: f[5], goal: f[6], src: (f.Length >= 7 ? f[7] : "") })
+    }
+    return entries
+}
+
+BuildSetReportText(entries, omitted) {
+    last := entries[entries.Length]
+    msg  := "📋 **作業報告** (" FormatTime(SubStr(last.ts, 1, 8) "000000", "M/d") ")`n完了セット：**" entries.Length " 件**`n"
+    for e in entries {
+        goal := (e.goal != "") ? e.goal : "（目標なし）"
+        if (StrLen(goal) > 80)
+            goal := SubStr(goal, 1, 80) "…"
+        mark := ""
+        if (e.status = "ok")
+            mark := "🖼️"
+        else if (e.status = "nosave")
+            mark := "⚠️保存なし"
+        else if (e.status = "error")
+            mark := "⚠️取得失敗"
+        msg .= "`n" SubStr(e.ts, 9, 2) ":" SubStr(e.ts, 11, 2) "  Set " e.setNum "/" e.total "：" goal (mark != "" ? "  " mark : "")
+    }
+    if (omitted > 0)
+        msg .= "`n`n（画像は最新10枚のみ添付。他に " omitted " 枚あり）"
+    if (StrLen(msg) > 1900)
+        msg := SubStr(msg, 1, 1890) "…"
+    return msg
+}
+
+SendSetReport(boundary, st, isTest := false) {
+    global setReportWebhook, setReportResultLog
+    entries := ParseSetLog(st.lastTs)
+    if (entries.Length = 0) {
+        if (!isTest)
+            WriteSetReportState(boundary, st.lastTs)
+        else
+            TrayTip("🧪 作業報告", "送信対象のセットがありません", "Mute")
+        return
+    }
+
+    ; 添付する画像（時系列順。10枚を超えたら最新の10枚だけ）
+    imgs := []
+    for e in entries {
+        if (e.status = "ok" && e.preview != "" && FileExist(e.preview))
+            imgs.Push(e.preview)
+    }
+    omitted := 0
+    if (imgs.Length > 10) {
+        omitted := imgs.Length - 10
+        trimmed := []
+        loop 10
+            trimmed.Push(imgs[omitted + A_Index])
+        imgs := trimmed
+    }
+
+    ; 1メッセージの添付サイズ上限に収まるよう、必要なら複数メッセージに分ける（先頭にだけ本文）
+    batches := []
+    cur     := []
+    curSize := 0
+    for p in imgs {
+        sz := 0
+        try sz := FileGetSize(p)
+        if (cur.Length > 0 && (cur.Length >= 10 || curSize + sz > 9 * 1024 * 1024)) {
+            batches.Push(cur)
+            cur     := []
+            curSize := 0
+        }
+        cur.Push(p)
+        curSize += sz
+    }
+    batches.Push(cur)   ; 画像が0枚のときは空の配列＝テキストのみ
+
+    msg   := BuildSetReportText(entries, omitted)
+    allOk := true
+    for i, b in batches {
+        text := (i = 1) ? msg : "📋 作業報告（続き " i "/" batches.Length "）"
+        if (!PostDiscordBatch(setReportWebhook, text, b, setReportResultLog)) {
+            allOk := false
+            break
+        }
+    }
+
+    if (allOk) {
+        if (!isTest)
+            WriteSetReportState(boundary, entries[entries.Length].ts)
+        TrayTip("📋 作業報告を送信", entries.Length " セット・画像 " imgs.Length " 枚" (isTest ? "（テスト）" : ""), "Mute")
+    } else {
+        TrayTip("⚠️ 作業報告の送信に失敗", "詳細: " setReportResultLog "（10分後に再試行します）", "Mute")
+    }
+}
+
+OnTestSetReport(*) {
+    ; テスト送信：前回報告以降の分を送る。送信済みの記録（状態ファイル）は更新しない
+    SendSetReport("", ReadSetReportState(), true)
+}
+
+; テキスト＋画像（0〜10枚）を1つのメッセージとして送る。成功なら true
+PostDiscordBatch(webhook, msgText, paths, logPath) {
+    q := Chr(34)
+    try FileDelete(logPath)
+    ps := "Add-Type -AssemblyName System.Net.Http`n"
+    ps .= "$logPath = " q logPath q "`n"
+    ps .= "function Log(`$msg) { Add-Content -Path `$logPath -Value ((Get-Date -Format " q "HH:mm:ss" q ") + ' ' + `$msg) }`n"
+    ps .= "$url    = " q webhook q "`n"
+    ps .= "$client = [System.Net.Http.HttpClient]::new()`n"
+    ps .= "$form   = [System.Net.Http.MultipartFormDataContent]::new()`n"
+
+    ; 本文は ConvertTo-Json に任せて安全にJSON化する（週次レポートと同じ方式）
+    psSafeMsg := StrReplace(msgText, "'", "''")
+    ps .= "$msgText  = '" psSafeMsg "'`n"
+    ps .= "$jsonBody = (@{ content = $msgText } | ConvertTo-Json -Compress)`n"
+    ps .= "$payload = [System.Net.Http.StringContent]::new(`$jsonBody, [System.Text.Encoding]::UTF8, " q "application/json" q ")`n"
+    ps .= "$payload.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse(" q "application/json" q ")`n"
+    ps .= "$form.Add(`$payload, " q "payload_json" q ")`n"
+
+    for i, path in paths {
+        fname := SubStr(path, InStr(path, "\",, -1) + 1)
+        ps .= "try {`n"
+        ps .= "    $bytes" i " = [System.IO.File]::ReadAllBytes(" q path q ")`n"
+        ps .= "    $mem"   i " = [System.Net.Http.ByteArrayContent]::new(`$bytes" i ")`n"
+        ps .= "    $mem"   i ".Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse(" q "image/png" q ")`n"
+        ps .= "    $form.Add(`$mem" i ", " q "files[" (i-1) "]" q ", " q fname q ")`n"
+        ps .= "} catch {`n"
+        ps .= "    Log('IMAGE_READ_FAILED " fname " ' + `$_.Exception.Message)`n"
+        ps .= "}`n"
+    }
+
+    ps .= "try {`n"
+    ps .= "    $resp = $client.PostAsync(`$url, `$form).Result`n"
+    ps .= "    if ($resp.IsSuccessStatusCode) {`n"
+    ps .= "        Log('SEND_OK ' + [int]$resp.StatusCode)`n"
+    ps .= "    } else {`n"
+    ps .= "        $body = $resp.Content.ReadAsStringAsync().Result`n"
+    ps .= "        Log('SEND_FAILED ' + [int]$resp.StatusCode + ' ' + $resp.ReasonPhrase + ' ' + $body)`n"
+    ps .= "    }`n"
+    ps .= "} catch {`n"
+    ps .= "    Log('SEND_EXCEPTION ' + $_.Exception.Message)`n"
+    ps .= "}`n"
+    ps .= "$client.Dispose()`n"
+
+    psPath := A_Temp "\set_report.ps1"
+    try FileDelete(psPath)
+    FileAppend(ps, psPath, "UTF-8")   ; BOM付きUTF-8（日本語・絵文字をPowerShell 5.1に正しく読ませるため）
+    RunWait('powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File "' psPath '"',, "Hide")
+
+    result := ""
+    try result := FileRead(logPath)
+    return InStr(result, "SEND_OK") > 0
+}
 
 ; ===== テスト用：週次レポートを今すぐ送信して動作確認する =====
 ; 使い方: launcher.ahk /test-croquis-report
@@ -2078,7 +2350,7 @@ UpdateIdleIconTip() {
     }
 
     if (!goalReachedToday) {
-        A_IconTip := "Work Launcher - 待機中"
+        A_IconTip := IdleTipText()
         return
     }
 
