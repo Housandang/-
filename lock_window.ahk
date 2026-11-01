@@ -121,7 +121,8 @@ CleanupPhaseFile(reason, code) {
     if (currentPhase = "lock") {
         ; ロック中の終了は常に通知
         SendDiscordAlert("⚠️ **ロック中にタイマーを終了しました**" setInfo " " FormatTime(, "HH:mm"))
-    } else if ((currentPhase = "break" || currentPhase = "intermission") && !goalReached) {
+    } else if ((currentPhase = "break" || currentPhase = "intermission") && !goalReached && !NormDisabled()) {
+        ; （【要望】デイリールーティン停止中は、ノルマ自体を計測しないのでこの通知も行わない）
         ; 休憩・中休み中でも、作業ノルマ（totalWorkGoalMinutes）未達成なら通知
         ; 達成済みなら休憩中の終了は正当な終了とみなし、通知しない
         label := (currentPhase = "intermission") ? "中休み" : "休憩"
@@ -876,7 +877,7 @@ breakDeferGraceSecs := 5
 _workActiveMs     := 0
 _workGoalReached  := false
 _effectiveGoalMin := totalWorkGoalMinutes
-if (totalWorkGoalMinutes != 0) {
+if (totalWorkGoalMinutes != 0 && !NormDisabled()) {   ; 【要望】デイリールーティン停止中はノルマ関連の処理を行わない
     try {
         _workGoalData := StrSplit(SafeReadFile(workGoalLogPath), "|")
         _storedDayId  := Integer(_workGoalData[1])
@@ -1144,17 +1145,44 @@ OnAddSet(btn, *) {
 ;   ・clipFolders が空のときは画像なしで目標だけを記録する
 ;   ・更新された .clip が見つからなければ「保存なし」として記録する
 ;   ・プレビュー取り出しは Python（clip_preview.py）で行う。pythonCmd で起動方法を変更できる
-clipFolders       := [C:\CLIPWORKING]   ; 例: ["D:\Manga\2026", "C:\Users\name\Documents\CLIPStudio"]（サブフォルダも検索）
+clipFolders       := ["C:\CLIPWORKING"]   ; .clipの保存フォルダ（複数なら ["A", "B"] のようにカンマ区切り。必ず引用符で囲む。サブフォルダも検索）
 clipSaveGraceSecs := 30   ; 休憩に入ってから、保存するために待つ秒数
 pythonCmd         := "py -3"
 setPreviewDir     := A_ScriptDir "\set_previews"
 setLogPath        := A_ScriptDir "\set_log.txt"
 previewJob        := ""
 
+; ■ デイリールーティン停止中のノルマ無効化
+;   launcher.ahk のトレイメニュー「起動時のデイリールーティンを停止」がONの間は
+;   routine_paused_flag.txt が存在する。そのとき、ノルマに関わる処理を全て行わない：
+;   作業時間の計測と work_goal.txt への保存、達成通知、ツールチップの進捗表示、
+;   終了時の「ノルマ未達成」通知。中休みの「作業完了」ボタンは常に表示する。
+;   （ロック中に終了したときの通知は、ノルマとは別の機能なので停止中も残す）
+;   フラグは都度ファイルの有無で判定するので、実行中に切り替えてもすぐ反映される。
+normWasDisabled := false   ; 起動時の状態は、下の「起動時の状態の反映」で設定する
+
+NormDisabled() {
+    return FileExist(A_ScriptDir "\routine_paused_flag.txt") ? true : false
+}
+
+; 停止中に起動していた場合に、停止解除後の最初の計測の前に、本日の記録を読み込み直す
+ReloadWorkGoalFromFile() {
+    global g, workGoalLogPath, currentDayId, effectiveWorkGoalMinutes
+    try {
+        d := StrSplit(SafeReadFile(workGoalLogPath), "|")
+        if (Integer(d[1]) = currentDayId) {
+            g.activeWorkMs     := Integer(d[2])
+            g.workGoalReached  := (d[3] = "1")
+            if (d.Length >= 4)
+                effectiveWorkGoalMinutes := Integer(d[4])
+        }
+    }
+}
+
 ; ■ ロック中の強制ミュート（通常の作業セットのみ。クロッキーは対象外）
 ;   ロック中は audioExemptProcesses 以外の全アプリの音を自動でミュートし続ける。
 ;   切り替えボタンは意図的に用意しない（休憩に入ると自動で元に戻る）。
-;   audio_lock.py が必要（pip install pycaw）。
+;   audio_lock.py が必要（pip install pycaw psutil）。
 audioLockEnabled     := true
 audioExemptProcesses := ["Spotify.exe"]
 audioLockStatePath   := A_ScriptDir "\audio_lock_state.json"
@@ -1179,7 +1207,7 @@ AudioLockSync() {
         audioLockPid    := 0
         audioLockFailed := true
         AudioLockRestore()
-        TrayTip("⚠️ 音声ミュートが動いていません", "audio_lock_error.log を確認してください（pip install pycaw が必要です）", "Mute")
+        TrayTip("⚠️ 音声ミュートが動いていません", "audio_lock_error.log を確認してください（pip install pycaw psutil が必要です）", "Mute")
         return
     }
     AudioLockStart()
@@ -1232,6 +1260,7 @@ AudioLockCleanup(reason, code) {
 AudioLockRestore()
 OnExit(AudioLockCleanup)
 SetTimer(AudioLockSync, 2000)
+normWasDisabled := NormDisabled()   ; 【起動時の状態の反映】停止中に起動したなら、解除時に記録を読み込み直す
 
 ; ===== セット終了時のプレビュー保存（変更不要）=====
 ; 休憩開始時に呼ぶ。保存猶予のカウントダウンを出したあと FinalizeSetPreview() で記録する
@@ -1266,6 +1295,8 @@ FinalizeSetPreview(job) {
     status      := "ok"
     previewPath := ""
     best        := ""
+    if (!IsObject(clipFolders))   ; ["…"] ではなく文字列だけが書かれていた場合も受け付ける
+        clipFolders := (clipFolders = "") ? [] : [clipFolders]
     if (clipFolders.Length = 0) {
         status := "nofolder"
     } else {
@@ -1350,7 +1381,7 @@ EnterIntermission() {
     timerSub.SetFont("cWhite")
     timerTitle.Value := "🛋️ 中休み"
     timerSub.Value   := "作業完了 or " intermissionMinutes "分後に再開"
-    workDoneBtn.Visible := g.workGoalReached   ; 作業達成済みのときのみ表示
+    workDoneBtn.Visible := (g.workGoalReached || NormDisabled())   ; 作業達成済みのときのみ表示（【要望】ルーティン停止中はノルマが無いので常に表示）
 
     FocusModeRestore()
     UpdateFocusBtnState()
@@ -1733,6 +1764,11 @@ UpdateWorkGoalTip() {
     if (totalWorkGoalMinutes = 0)
         return
 
+    if (NormDisabled()) {   ; 【要望】デイリールーティン停止中
+        A_IconTip := "lock_window（ノルマ計測は停止中）"
+        return
+    }
+
     if (g.workGoalReached) {
         A_IconTip := "🎯 本日の作業ノルマ達成済み"
         return
@@ -1750,7 +1786,20 @@ UpdateWorkGoalTip()   ; 起動直後にも初期値を表示しておく
 SetTimer(CheckActiveWork, 5000)
 
 CheckActiveWork() {
-    global g, totalWorkGoalMinutes, effectiveWorkGoalMinutes, workIdleToleranceSecs, workGoalLogPath, currentDayId
+    global g, totalWorkGoalMinutes, effectiveWorkGoalMinutes, workIdleToleranceSecs, workGoalLogPath, currentDayId, normWasDisabled
+
+    ; 【要望】launcher.ahk のデイリールーティン停止中は、ノルマの計測・保存・達成通知を行わない。
+    ; 停止中に起動した場合は、本日の記録（work_goal.txt）を読み込んでいないため、
+    ; 停止が解除された時点で読み込み直す（空の値で記録を上書きしてしまわないようにするため）
+    if (NormDisabled()) {
+        g.lastActiveCheck := 0
+        normWasDisabled   := true
+        return
+    }
+    if (normWasDisabled) {
+        normWasDisabled := false
+        ReloadWorkGoalFromFile()
+    }
 
     ; ロックフェーズ・中休み中・一時停止していないときのみ計測
     ; （中休み中も計測対象に含めないと「中休み中に達成した場合も即座に表示」が機能しないため）

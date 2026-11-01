@@ -270,10 +270,10 @@ croquisReportHour    := 15   ; 15時
 ;    PCが22時に起きていなかった場合は、次に起動したときに投稿する。
 ;
 ;    setReportHour    → 投稿する時刻（時・24時間表記）
-;    setReportWebhook → 投稿先（既定はクロッキー週次レポートと同じ）
+;    setReportWebhook → 投稿先（作業報告専用のURL。?thread_id=… 付きなので特定のスレッドに投稿される）
 ; ================================================================
 setReportHour       := 22
-setReportWebhook    := "https://discord.com/api/webhooks/1514960540949282948/QWx9sLWEDVBct8MUXU5EvsgiGKcY5C3BRriVil5Ye_yM2hvCKJPfFdI-MryZNVmhDXBS?thread_id=1481303569721462824"
+setReportWebhook    := "https://discord.com/api/webhooks/1514960540949282948/QWx9sLWEDVBct8MUXU5EvsgiGKcY5C3BRriVil5Ye_yM2hvCKJPfFdI-MryZNVmhDXBS?thread_id=1481303569721462824"   ; 作業報告専用（thread_id指定つき＝特定のスレッドへ投稿）
 setLogPath          := A_ScriptDir "\set_log.txt"
 setReportStatePath  := A_ScriptDir "\set_report_state.txt"
 setReportResultLog  := A_ScriptDir "\set_report_log.txt"
@@ -925,7 +925,7 @@ WriteSetReportState(boundary, lastTs) {
     SafeWriteFile(setReportStatePath, "boundary=" boundary "`nlastTs=" lastTs "`n")
 }
 
-; set_log.txt（タブ区切り: 時刻, セット番号, 総セット数, 状態, 画像パス, 目標, 元ファイル）から
+; set_log.txt（タブ区切り: 記録時刻（送信対象の判定にだけ使い、報告には載せない）, セット番号, 総セット数, 状態, 画像パス, 目標, 元ファイル）から
 ; sinceTs より新しい行を取り出す
 ParseSetLog(sinceTs) {
     global setLogPath
@@ -960,7 +960,9 @@ BuildSetReportText(entries, omitted) {
             mark := "⚠️保存なし"
         else if (e.status = "error")
             mark := "⚠️取得失敗"
-        msg .= "`n" SubStr(e.ts, 9, 2) ":" SubStr(e.ts, 11, 2) "  Set " e.setNum "/" e.total "：" goal (mark != "" ? "  " mark : "")
+        else if (e.status = "nofolder")
+            mark := "⚠️保存フォルダ未設定"
+        msg .= "`n" "Set " e.setNum "/" e.total "：" goal (mark != "" ? "  " mark : "")
     }
     if (omitted > 0)
         msg .= "`n`n（画像は最新10枚のみ添付。他に " omitted " 枚あり）"
@@ -2244,7 +2246,14 @@ IsOvertimeWorkWindow() {
 
 CheckOvertimeWork() {
     global overtimeMs, overtimeDayId, overtimeLastCheck, overtimeLogPath, currentDayId
-    global overtimeIdleToleranceSecs, phaseFile, workGoalLogPath
+    global overtimeIdleToleranceSecs, phaseFile, workGoalLogPath, routinePaused
+
+    ; 【要望】デイリールーティン停止中はノルマ関連の計測（ロック外の残業時間）を行わない。
+    ; 停止中の経過時間が、解除後の最初の計測で一度に加算されないよう、基準時刻をリセットしておく
+    if (routinePaused) {
+        overtimeLastCheck := 0
+        return
+    }
 
     ; dayId（睡眠ベースの日付境界）が変わったら「メモリ上のカウンタ」だけリセットする（ファイルは触らない）。
     ; ここで overtime_work.txt を即座に上書きすると、日をまたいで作業を続けていた場合に
@@ -2329,13 +2338,19 @@ FormatMinutesHM(mins) {
 
 UpdateIdleIconTip() {
     global countdownEnd, nightModeActive, workGoalLogPath, overtimeLogPath, currentDayId
-    global totalWorkGoalMinutes, workGoalMinMinutes
+    global totalWorkGoalMinutes, workGoalMinMinutes, routinePaused
 
     ; カウントダウン中・就寝モード中はそちらの表示を優先し、何もしない
     if (nightModeActive)
         return
     if (countdownEnd > 0 && countdownEnd > A_TickCount)
         return
+
+    ; 【要望】デイリールーティン停止中は、ノルマの達成状況・翌日ノルマの予測を表示しない
+    if (routinePaused) {
+        A_IconTip := IdleTipText()
+        return
+    }
 
     goalReachedToday := false
     todayActiveMin    := 0
