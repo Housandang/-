@@ -1165,6 +1165,15 @@ NormDisabled() {
     return FileExist(A_ScriptDir "\routine_paused_flag.txt") ? true : false
 }
 
+; ■ シンプルモード（ノルマのみ）
+;   launcher.ahk のトレイメニュー「シンプルモード（ノルマのみ）」がONの間は simple_mode_flag.txt が存在する。
+;   そのとき、付随機能を止める：セット開始時の目標入力、休憩中の保存猶予とプレビュー保存（=22時の作業報告の
+;   材料が記録されない）、集中モードの自動発動。ロック中の強制ミュート・ウィンドウブロック・ノルマ・
+;   サボり監視などの基本機能は、通常どおり動く。フラグは都度判定するので、実行中に切り替えても反映される。
+SimpleMode() {
+    return FileExist(A_ScriptDir "\simple_mode_flag.txt") ? true : false
+}
+
 ; 停止中に起動していた場合に、停止解除後の最初の計測の前に、本日の記録を読み込み直す
 ReloadWorkGoalFromFile() {
     global g, workGoalLogPath, currentDayId, effectiveWorkGoalMinutes
@@ -1266,6 +1275,8 @@ normWasDisabled := NormDisabled()   ; 【起動時の状態の反映】停止中
 ; 休憩開始時に呼ぶ。保存猶予のカウントダウンを出したあと FinalizeSetPreview() で記録する
 BeginSetPreviewCapture(setNum) {
     global g, previewJob, clipSaveGraceSecs
+    if (SimpleMode())   ; シンプルモードでは保存猶予・プレビュー保存・記録を行わない
+        return
     previewJob := { setNum: setNum, total: g.totalSets, goal: g.setGoal, start: g.setStartNow, endTick: A_TickCount + clipSaveGraceSecs * 1000 }
     SetTimer(PreviewSaveTick, 500)
 }
@@ -3668,6 +3679,8 @@ LockSubText() {
 PromptSetGoal(setNum) {
     global g, timerTitle, timerSub
     g.setGoal := ""
+    if (SimpleMode())   ; シンプルモードでは目標を入力しない
+        return
     try {
         timerTitle.Value := "✏️ Set " setNum "/" g.totalSets " の目標"
         timerSub.Value   := "入力後にロックを開始します"
@@ -3740,7 +3753,7 @@ RunPomodoro(targetTitles, lockSecs, breakSecs, totalSets, startSet := 1) {
             g.focusMode     := false
             g.focusModeIsAuto := false
         }
-        if (!g.focusMode && !g.lastSetHadFocusMode && currentSet >= focusModeAutoFromSet) {
+        if (!g.focusMode && !g.lastSetHadFocusMode && currentSet >= focusModeAutoFromSet && !SimpleMode()) {
             if (Random(1, 100) <= focusModeAutoChance) {
                 g.focusMode       := true
                 g.focusModeIsAuto := true

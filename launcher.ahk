@@ -284,6 +284,14 @@ setReportLastTry    := 0
 routinePausedFlagPath := A_ScriptDir "\routine_paused_flag.txt"
 routinePaused         := FileExist(routinePausedFlagPath) ? true : false
 
+; ★ 【要望】シンプルモード（ノルマのみ）のフラグ
+;    ONの間は、起床後のクロッキーを行わず、待機カウントダウンの後すぐ作業タイマーを始める。
+;    lock_window.ahk 側も同じフラグを見て、目標入力・プレビュー保存・集中モードの自動発動を止める
+;    （ロック中の強制ミュートや、ノルマ・サボり監視などの基本機能はそのまま）。
+;    トレイメニューで切り替え。ファイルで保持するので再起動後も維持される。
+simpleModeFlagPath := A_ScriptDir "\simple_mode_flag.txt"
+simpleMode         := FileExist(simpleModeFlagPath) ? true : false
+
 ; ================================================================
 ; ★ 就寝時スマホブロックの設定
 ;
@@ -361,6 +369,9 @@ trayMenu.Add("🧪 右脳ドローイング（テスト実行）", OnFastCroquis
 trayMenu.Add("🧪 スマホ格納確認テスト", OnTestPhoneBoxConfirmation)
 trayMenu.Add("🚫 本日のクロッキーをスキップ（代わりに軽量版を実行）", OnToggleSkipCroquis)
 trayMenu.Add("⏸ 起動時のデイリールーティンを停止（常駐のみ）", OnToggleRoutinePaused)
+trayMenu.Add("🧩 シンプルモード（ノルマのみ）", OnToggleSimpleMode)
+if (simpleMode)
+    trayMenu.Check("🧩 シンプルモード（ノルマのみ）")
 trayMenu.Add("🧪 作業報告を今すぐ送信（テスト）", OnTestSetReport)
 if (routinePaused)
     trayMenu.Check("⏸ 起動時のデイリールーティンを停止（常駐のみ）")
@@ -871,9 +882,28 @@ OnToggleRoutinePaused(*) {
     A_IconTip := IdleTipText()
 }
 
+; ===== 【要望】シンプルモード（ノルマのみ）=====
+; ON：起床後の待機カウントダウンのあと、クロッキーを行わずに作業タイマーを始める（LaunchCroquis の冒頭で分岐）。
+; lock_window.ahk 側も simple_mode_flag.txt を見て、目標入力・プレビュー保存・集中モードの自動発動を行わない。
+; ロック中の強制ミュート・ウィンドウブロック・ノルマ・サボり監視・スマホ格納確認などは、通常どおり動く。
+OnToggleSimpleMode(*) {
+    global simpleMode, simpleModeFlagPath, trayMenu
+    simpleMode := !simpleMode
+    if (simpleMode) {
+        SafeWriteFile(simpleModeFlagPath, "1")
+        trayMenu.Check("🧩 シンプルモード（ノルマのみ）")
+        TrayTip("🧩 シンプルモード ON", "次の起床から、クロッキーなしで待機のあと作業を始めます（もう一度クリックで解除）", "Mute")
+    } else {
+        SafeDeleteFile(simpleModeFlagPath)
+        trayMenu.Uncheck("🧩 シンプルモード（ノルマのみ）")
+        TrayTip("🧩 シンプルモード OFF", "通常のルーティン（クロッキー付き）に戻ります", "Mute")
+    }
+    A_IconTip := IdleTipText()
+}
+
 IdleTipText() {
-    global routinePaused
-    return "Work Launcher - 待機中" (routinePaused ? "｜⏸ ルーティン停止中" : "")
+    global routinePaused, simpleMode
+    return "Work Launcher - 待機中" (routinePaused ? "｜⏸ ルーティン停止中" : "") (simpleMode ? "｜🧩 シンプル" : "")
 }
 
 ; ===== 【要望】毎日の作業報告（セット目標＋プレビュー画像）=====
@@ -1540,6 +1570,15 @@ GetScheduledCroquisMode() {
 
 LaunchCroquis() {
     global scriptPath, croquisMode, croquisModeParams, croquisRandomExcludeModes, croquisModeCyclePath, croquisSchedulePath, delayMinutes, countdownEnd, countdownMode, skipCroquisToday
+
+    ; 【要望】シンプルモードのときは、クロッキーを行わずそのまま作業タイマーを始める
+    ; （「本日のクロッキーをスキップ」の軽量版（モード8）も行わない）
+    global simpleMode
+    if (simpleMode) {
+        TrayTip("🧩 シンプルモード", "クロッキーを行わず、作業を始めます", "Mute")
+        LaunchMain()
+        return
+    }
 
     ; 【要望】トレイメニューで「本日のクロッキーをスキップ」がONの場合、
     ; 通常のクロッキーを完全に無くすのではなく、代わりにモード8（1分×10枚の
